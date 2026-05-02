@@ -47,9 +47,6 @@ class InvoiceService:
         Returns True if parsing succeeded (even with warnings).
         Returns False if any gate fails.
         """
-        # AI_RECOMMENDATION : the parsing logic is completely wrong? the sender and the vendor both(from and to) both can have gst's we have the company's name in repo/session and it is an invoice so, the from is an vendor and the to is the company. so we need to validate the user in the to and verify for gst /pan
-        # AI_RECOMMENDATION : every invoice should have an mandatory BILL NUMBER and INVOICE DATE . Due date is optional, but parse it and save it as well
-
         record = self.invoice_repo.get_by_id(invoice_id)
         if not record:
             logger.error("Invoice %d not found", invoice_id)

@@ -374,6 +374,20 @@ def sync_platform_vendors(platform: str, db: Session = Depends(get_db)):
     }
 
 
+@router.delete("/platform-vendors/{platform}/{platform_vendor_id}")
+def delete_platform_vendor(platform: str, platform_vendor_id: str, db: Session = Depends(get_db)):
+    """Delete a synced platform vendor from the local database."""
+    from app.db.repository import PlatformVendorRepository
+    pv_repo = PlatformVendorRepository(db)
+    vendor = pv_repo.get_by_platform_vendor_id(platform, platform_vendor_id)
+    if not vendor:
+        raise HTTPException(status_code=404, detail="Platform vendor not found")
+    db.delete(vendor)
+    db.commit()
+    logger.info("Platform vendor deleted: %s / %s", platform, platform_vendor_id)
+    return {"status": "success", "message": f"Platform vendor '{vendor.vendor_name}' removed"}
+
+
 @router.post("/link-vendor")
 def link_vendor_mapping(body: dict, db: Session = Depends(get_db), user: User = Depends(get_optional_user)):
     """Create a mapping linking an invoice vendor name to a platform vendor.
@@ -451,18 +465,24 @@ def create_vendor_on_platform(
 
     # Validate source side: alias must exist in invoice drafts
     from sqlalchemy import func
-    from app.models.db_models import InvoiceDraft
-    source_exists = (
+    from app.models.db_models import InvoiceDraft, InvoiceRecord
+    source_draft = (
         db.query(InvoiceDraft)
         .filter(func.lower(InvoiceDraft.vendor_name) == alias_name.lower())
         .first()
     )
-    if not source_exists:
+    if not source_draft:
         raise HTTPException(
             status_code=400,
             detail=f"Source vendor '{alias_name}' not found in any invoice draft. "
             "Only vendors from parsed invoices can be mapped.",
         )
+
+    # Pull vendor GST, PAN, address from the linked InvoiceRecord
+    invoice: InvoiceRecord = source_draft.invoice
+    vendor_gst = (invoice.gst_number or "").strip() or None
+    vendor_pan = (invoice.pan_number or "").strip() or None
+    vendor_address = (invoice.vendor_address or "").strip() or None
 
     if platform not in _BILLING_REGISTRY:
         raise HTTPException(status_code=400, detail=f"Unknown platform: {platform}")
@@ -477,9 +497,14 @@ def create_vendor_on_platform(
     cls = _BILLING_REGISTRY[platform]
     instance = cls(config)
 
-    # Step 1: Create vendor on the platform
+    # Step 1: Create vendor on the platform with full GST details
     try:
-        platform_vendor_id = instance.create_vendor(canonical_name)
+        platform_vendor_id = instance.create_vendor(
+            canonical_name,
+            gst_number=vendor_gst,
+            pan_number=vendor_pan,
+            address=vendor_address,
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to create vendor on {platform}: {e}")
 

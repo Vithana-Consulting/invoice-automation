@@ -1,7 +1,8 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useSearchParams } from 'next/navigation';
 import { api } from '@/lib/api';
 import type { ApiResponse } from '@/types';
 import { SubTabs } from '@/components/ui/sub-tabs';
@@ -75,11 +76,28 @@ function TestResultBanner({ result }: { result: TestResult }) {
 
 export default function IntegrationsPage() {
   const queryClient = useQueryClient();
+  const searchParams = useSearchParams();
   const [activeTab, setActiveTab] = useState('all');
   const [configuring, setConfiguring] = useState<string | null>(null);
   const [configValues, setConfigValues] = useState<Record<string, string>>({});
   const [testResults, setTestResults] = useState<Record<string, TestResult>>({});
   const [testingPlatform, setTestingPlatform] = useState<string | null>(null);
+  const [zohoAuthStatus, setZohoAuthStatus] = useState<'success' | 'error' | null>(null);
+  const [zohoAuthError, setZohoAuthError] = useState<string>('');
+  const [zohoAuthorising, setZohoAuthorising] = useState(false);
+
+  // Handle redirect back from Zoho OAuth callback
+  useEffect(() => {
+    if (searchParams.get('zoho_connected') === '1') {
+      setZohoAuthStatus('success');
+      queryClient.invalidateQueries({ queryKey: ['integrations'] });
+      window.history.replaceState({}, '', '/integrations');
+    } else if (searchParams.get('zoho_error')) {
+      setZohoAuthStatus('error');
+      setZohoAuthError(searchParams.get('zoho_error') || 'Unknown error');
+      window.history.replaceState({}, '', '/integrations');
+    }
+  }, [searchParams, queryClient]);
 
   const { data: integrationsData } = useQuery({
     queryKey: ['integrations'],
@@ -166,6 +184,25 @@ export default function IntegrationsPage() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['integrations'] }),
   });
 
+  const handleZohoAuthorise = async (integrationId: number) => {
+    setZohoAuthorising(true);
+    try {
+      const res = await api.get<ApiResponse<{ authorize_url: string }>>(
+        `/api/integrations/zoho/oauth/authorize?integration_id=${integrationId}`
+      );
+      const url = res.data?.authorize_url;
+      if (url) {
+        window.location.href = url;
+      } else {
+        alert('Could not generate Zoho authorisation URL. Check your config.');
+      }
+    } catch (err: any) {
+      alert(`Zoho authorise failed: ${err.message || 'Unknown error'}`);
+    } finally {
+      setZohoAuthorising(false);
+    }
+  };
+
   const openConfigForm = async (platform: string, integrationId: number | null) => {
     const schema = schemas.get(platform);
     if (!schema) return;
@@ -193,7 +230,7 @@ export default function IntegrationsPage() {
     const schema = schemas.get(platform);
     if (schema) {
       const missing = schema.fields
-        .filter((f: PlatformField) => f.required && !configValues[f.key]?.trim())
+        .filter((f: PlatformField) => f.required && f.key !== 'refresh_token' && !configValues[f.key]?.trim())
         .map((f: PlatformField) => f.label);
       if (missing.length > 0) {
         setConfigErrors(missing);
@@ -237,7 +274,7 @@ export default function IntegrationsPage() {
           </div>
           <p className="text-sm text-gray-500 mb-4">{item.description}</p>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             {item.is_configured && item.id ? (
               <>
                 <button onClick={() => openConfigForm(item.platform, item.id)} className="text-sm text-primary-600 hover:text-primary-700">Edit Config</button>
@@ -248,6 +285,15 @@ export default function IntegrationsPage() {
                 >
                   {isTesting ? 'Testing...' : 'Test Connection'}
                 </button>
+                {item.platform === 'zoho' && (
+                  <button
+                    onClick={() => handleZohoAuthorise(item.id!)}
+                    disabled={zohoAuthorising}
+                    className="text-sm px-3 py-1 bg-orange-500 text-white rounded-lg hover:bg-orange-600 disabled:opacity-50"
+                  >
+                    {zohoAuthorising ? 'Redirecting...' : 'Authorise with Zoho'}
+                  </button>
+                )}
                 <button
                   onClick={() => { if (confirm('Remove this integration?')) deleteMutation.mutate(item.id!); }}
                   className="text-sm text-red-500 hover:text-red-700 ml-auto"
@@ -328,6 +374,19 @@ export default function IntegrationsPage() {
   return (
     <div>
       <h1 className="text-2xl font-bold text-gray-900 mb-6">Integrations</h1>
+
+      {zohoAuthStatus === 'success' && (
+        <div className="mb-4 p-4 bg-green-50 border border-green-200 rounded-lg flex items-center justify-between">
+          <p className="text-green-700 font-medium">✓ Zoho Books connected successfully! Refresh token saved.</p>
+          <button onClick={() => setZohoAuthStatus(null)} className="text-green-500 hover:text-green-700 text-lg">✕</button>
+        </div>
+      )}
+      {zohoAuthStatus === 'error' && (
+        <div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg flex items-center justify-between">
+          <p className="text-red-700 font-medium">✗ Zoho authorisation failed: {zohoAuthError}</p>
+          <button onClick={() => setZohoAuthStatus(null)} className="text-red-500 hover:text-red-700 text-lg">✕</button>
+        </div>
+      )}
 
       <SubTabs tabs={tabs} activeTab={activeTab} onChange={setActiveTab} />
 

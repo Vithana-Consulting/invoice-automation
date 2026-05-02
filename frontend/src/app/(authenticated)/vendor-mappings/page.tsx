@@ -157,6 +157,14 @@ export default function VendorMappingsPage() {
     },
   });
 
+  const deletePlatformVendorMutation = useMutation({
+    mutationFn: ({ platform, platformVendorId }: { platform: string; platformVendorId: string }) =>
+      api.delete(`/api/vendor-mappings/platform-vendors/${platform}/${encodeURIComponent(platformVendorId)}`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['platform-vendors'] });
+    },
+  });
+
   // --- Derived data ---
 
   const allMappings = data?.data || [];
@@ -506,14 +514,25 @@ export default function VendorMappingsPage() {
                       ) : '-'}
                     </td>
                     <td className="px-4 py-3 text-sm text-right">
-                      {!v.is_mapped && (
+                      <div className="flex items-center justify-end gap-3">
+                        {!v.is_mapped && (
+                          <button
+                            onClick={() => { setLinkingVendor(v); setLinkAlias(''); }}
+                            className="text-primary-600 hover:text-primary-700 text-sm"
+                          >
+                            Map
+                          </button>
+                        )}
                         <button
-                          onClick={() => { setLinkingVendor(v); setLinkAlias(''); }}
-                          className="text-primary-600 hover:text-primary-700 text-sm"
+                          onClick={() => {
+                            if (confirm(`Remove "${v.platform_vendor_name}" from local database?`))
+                              deletePlatformVendorMutation.mutate({ platform: v.platform, platformVendorId: v.platform_vendor_id });
+                          }}
+                          className="text-red-500 hover:text-red-700 text-sm"
                         >
-                          Map
+                          Delete
                         </button>
-                      )}
+                      </div>
                     </td>
                   </tr>
                 ))}

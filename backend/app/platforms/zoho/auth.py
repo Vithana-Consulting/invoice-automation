@@ -70,3 +70,37 @@ class ZohoAuth:
         with self._lock:
             self._access_token = None
             self._expires_at = 0
+
+    @staticmethod
+    def exchange_code(
+        client_id: str,
+        client_secret: str,
+        code: str,
+        redirect_uri: str,
+        auth_url: str = "https://accounts.zoho.in/oauth/v2/token",
+    ) -> dict:
+        """Exchange a Zoho grant code for access + refresh tokens.
+
+        Returns the full token response dict (contains refresh_token).
+        Raises ZohoAuthError on failure.
+        """
+        try:
+            resp = httpx.post(auth_url, data={
+                "code": code,
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "redirect_uri": redirect_uri,
+                "grant_type": "authorization_code",
+            }, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+        except httpx.HTTPStatusError as e:
+            logger.error("Zoho code exchange failed: HTTP %d — %s", e.response.status_code, e.response.text[:500])
+            raise ZohoAuthError(f"Code exchange failed: HTTP {e.response.status_code} — {e.response.text[:200]}")
+        except Exception as e:
+            raise ZohoAuthError(f"Code exchange failed: {e}")
+
+        if "refresh_token" not in data:
+            raise ZohoAuthError(f"No refresh_token in response: {data}")
+
+        return data

@@ -102,43 +102,51 @@ def validate_parsed_invoice(invoice, db: Session) -> PipelineResult:
     """Gate 3: Validate parsed invoice data.
 
     Checks:
-      - invoice_number is MANDATORY
-      - GST/PAN match with company config (warnings)
+      - invoice_number is MANDATORY (error)
+      - invoice_date is MANDATORY (error)
+      - buyer_gst_number matches company GSTIN (warning) — buyer is our company
+      - buyer_pan_number matches company PAN (warning) — buyer is our company
     """
     result = PipelineResult(stage="validate")
 
     # Mandatory: invoice number
-    # AI_RECOMMENDATION : add billno and invoice date as mandatory as well
     if not invoice.invoice_number or not invoice.invoice_number.strip():
         result.add_error(
             "MISSING_INVOICE_NUMBER",
             "No invoice number found in the document. This field is required.",
         )
 
-    # Company GST/PAN validation
-    # AI_RECOMMENDATION : the invoice number matching has to be with the buyer's not the vendor's gst or pan
+    # Mandatory: invoice date
+    if not invoice.date or not str(invoice.date).strip():
+        result.add_error(
+            "MISSING_INVOICE_DATE",
+            "No invoice date found in the document. This field is required.",
+        )
+
+    # Buyer GST/PAN validation — invoices are inbound: vendor → our company.
+    # We validate the BUYER fields (buyer_gst_number, buyer_pan_number) against
+    # the company's registered GST/PAN. The vendor's GST (gst_number) is informational.
     company_id = TenantContext.get_optional()
     if company_id:
         company = db.query(Company).filter(Company.id == company_id).first()
         if company:
-            # GST check
-            if not invoice.gst_number:
-                result.add_warning("MISSING_GST", "No GSTIN found in the invoice.")
-            elif company.gst_number and invoice.gst_number != company.gst_number:
+            # Buyer GST check
+            if not invoice.buyer_gst_number:
+                result.add_warning("MISSING_BUYER_GST", "Buyer GSTIN not found in invoice.")
+            elif company.gst_number and invoice.buyer_gst_number != company.gst_number:
                 result.add_warning(
                     "GST_MISMATCH",
-                    f"Invoice GSTIN ({invoice.gst_number}) does not match "
+                    f"Buyer GSTIN on invoice ({invoice.buyer_gst_number}) does not match "
                     f"company GSTIN ({company.gst_number}).",
                 )
 
-            # PAN check
-            # AI_RECOMMENDATION : validate with the PAN of the buyer!!
-            if not invoice.pan_number:
-                result.add_warning("MISSING_PAN", "No PAN found in the invoice.")
-            elif company.pan_number and invoice.pan_number != company.pan_number:
+            # Buyer PAN check
+            if not invoice.buyer_pan_number:
+                result.add_warning("MISSING_BUYER_PAN", "Buyer PAN not found in invoice.")
+            elif company.pan_number and invoice.buyer_pan_number != company.pan_number:
                 result.add_warning(
                     "PAN_MISMATCH",
-                    f"Invoice PAN ({invoice.pan_number}) does not match "
+                    f"Buyer PAN on invoice ({invoice.buyer_pan_number}) does not match "
                     f"company PAN ({company.pan_number}).",
                 )
 

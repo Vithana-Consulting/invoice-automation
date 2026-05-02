@@ -75,8 +75,33 @@ class ZohoClient:
         return self._handle_response(resp)
 
     @zoho_retry
+    def find_bill_by_number(self, bill_number: str) -> dict | None:
+        """Search for an existing bill by bill_number (for deduplication)."""
+        url = f"{self.base_url}/bills"
+        resp = httpx.get(url, headers=self._headers(),
+                         params=self._params({"bill_number": bill_number}), timeout=30)
+        data = self._handle_response(resp)
+        bills = data.get("bills", [])
+        for b in bills:
+            if b.get("bill_number") == bill_number:
+                return b
+        return None
+
     def list_chartofaccounts(self) -> list:
-        """Fetch all accounts from Zoho Books Chart of Accounts."""
+        """Fetch all Chart of Accounts from Zoho Books with pagination."""
         url = f"{self.base_url}/chartofaccounts"
-        resp = httpx.get(url, headers=self._headers(), params=self._params(), timeout=30) # AI_RECOMMENDATION : What if there are 10k COA? batch fetch 50 per batch
-        return self._handle_response(resp).get("chartofaccounts", [])
+        all_accounts = []
+        page = 1
+        while True:
+            resp = httpx.get(
+                url, headers=self._headers(),
+                params=self._params({"page": page, "per_page": 200}),
+                timeout=30,
+            )
+            data = self._handle_response(resp)
+            accounts = data.get("chartofaccounts", [])
+            all_accounts.extend(accounts)
+            if not data.get("page_context", {}).get("has_more_page", False):
+                break
+            page += 1
+        return all_accounts

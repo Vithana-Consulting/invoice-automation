@@ -22,7 +22,7 @@ from app.config import (
 )
 from app.db.session import get_db
 from app.models.db_models import (
-    AuditLog, Company, CompanyMember, Integration,
+    AuditLog, ChartOfAccount, Company, CompanyMember, Integration,
     InvoiceDraft, InvoiceRecord, PlatformVendor,
     ProcessedEmail, Rule, User, VendorCache, VendorMapping,
 )
@@ -94,27 +94,38 @@ class CompanyOAuthRequest(BaseModel):
 
 @router.get("/companies", dependencies=[Depends(_verify_admin_key)])
 def list_companies(db: Session = Depends(get_db)):
-    """List all companies with OAuth status and member emails."""
+    """List all companies with OAuth status and member emails. Uses 3 queries total (not N+1)."""
     companies = db.query(Company).order_by(Company.id).all()
+
+    # Batch: all OAuth-configured company IDs in one query
+    oauth_company_ids = {
+        row.company_id
+        for row in db.query(Integration.company_id)
+        .filter(Integration.platform == "google_oauth", Integration.config_encrypted.isnot(None))
+        .all()
+    }
+
+    # Batch: all active members across all companies in one query
+    members_rows = (
+        db.query(User.email, CompanyMember.role, CompanyMember.company_id)
+        .join(CompanyMember, CompanyMember.user_id == User.id)
+        .filter(CompanyMember.is_active == True)
+        .all()
+    )
+    members_by_company: dict = {}
+    for email, role, company_id in members_rows:
+        members_by_company.setdefault(company_id, []).append({"email": email, "role": role})
+
     result = []
     for c in companies:
-        oauth = db.query(Integration).filter(
-            Integration.company_id == c.id, Integration.platform == "google_oauth"
-        ).first()
-        members = (
-            db.query(User.email, CompanyMember.role)
-            .join(CompanyMember, CompanyMember.user_id == User.id)
-            .filter(CompanyMember.company_id == c.id, CompanyMember.is_active == True)
-            .all()
-        )
         result.append({
             "id": c.id, "name": c.name, "slug": c.slug, "domain": c.domain,
             "is_active": c.is_active,
-            "oauth_configured": oauth is not None and oauth.config_encrypted is not None,
-            "members": [{"email": email, "role": role} for email, role in members],
+            "oauth_configured": c.id in oauth_company_ids,
+            "members": members_by_company.get(c.id, []),
             "created_at": str(c.created_at) if c.created_at else None,
         })
-    return {"status": "success", "data": result} # AI_RECOMMENDATION : it does N query for N companies : it might get slow, if it case there are 10K companies? how to handle it
+    return {"status": "success", "data": result}
 
 
 @router.post("/companies", dependencies=[Depends(_verify_admin_key)])
@@ -221,7 +232,7 @@ def delete_company(company_id: int, db: Session = Depends(get_db)):
     # Delete all tenant-scoped data (FK-safe order)
     for model in [InvoiceDraft, InvoiceRecord, ProcessedEmail, VendorCache,
                   AuditLog, Rule, VendorMapping, PlatformVendor,
-                  Integration, CompanyMember]:
+                  ChartOfAccount, Integration, CompanyMember]:
         db.query(model).filter(model.company_id == company_id).delete()
 
     # Delete company
@@ -392,6 +403,43 @@ def reset_all_config():
 
 
 # ── Flush ─────────────────────────────────────────────────────────────────
+
+@router.post("/companies/{company_id}/flush", dependencies=[Depends(_verify_admin_key)])
+def flush_company(company_id: int, db: Session = Depends(get_db)):
+    """Delete all invoice data for a specific company (keeps company + members + integrations)."""
+    company = db.query(Company).filter(Company.id == company_id).first()
+    if not company:
+        raise HTTPException(status_code=404, detail="Company not found")
+
+    results = {}
+    for table in FLUSH_TABLES:
+        try:
+            row_count = db.execute(text(f"SELECT COUNT(*) FROM {table} WHERE company_id = :cid"), {"cid": company_id}).scalar()
+            db.execute(text(f"DELETE FROM {table} WHERE company_id = :cid"), {"cid": company_id})
+            results[table] = row_count
+        except Exception as e:
+            results[table] = f"error: {e}"
+
+    # Delete company attachments
+    attachment_dir = os.path.join(settings.ATTACHMENT_DIR, str(company_id))
+    if os.path.exists(attachment_dir):
+        file_count = sum(1 for _, _, files in os.walk(attachment_dir) for _ in files)
+        shutil.rmtree(attachment_dir)
+        os.makedirs(attachment_dir, exist_ok=True)
+        results["attachments_deleted"] = file_count
+    else:
+        results["attachments_deleted"] = 0
+
+    db.commit()
+    total_rows = sum(v for v in results.values() if isinstance(v, int))
+    logger.warning("FLUSH company %d (%s): %d rows deleted", company_id, company.name, total_rows)
+
+    return {
+        "status": "success",
+        "message": f"Flushed {total_rows} rows for '{company.name}'",
+        "data": results,
+    }
+
 
 @router.post("/flush", dependencies=[Depends(_verify_admin_key)])
 def flush_all(db: Session = Depends(get_db)):

@@ -23,19 +23,23 @@ def invoice_to_zoho_bill(
     vendor_id: str,
     accounts: Optional[ResolvedAccounts] = None,
     fallback_account_id: str = "",
+    tax_id: Optional[str] = None,
 ) -> dict:
     """Map an InvoiceRecord to Zoho Books create-bill payload.
 
-    Account resolution priority:
-      1. COA-resolved account (accounts.main_account_ref) — from Chart of Accounts
-      2. Fallback account_id — from Zoho integration config (legacy)
-      3. No account — Zoho uses its default
+    Account resolution priority per line item:
+      1. HSN/SAC code match in accounts.hsn_account_map
+      2. Draft-level COA account (accounts.main_account_ref)
+      3. Fallback account_id from Zoho integration config
     """
-    account_id = ""
+    # Draft-level fallback account
+    draft_account_id = ""
     if accounts and accounts.main_account_ref:
-        account_id = accounts.main_account_ref
+        draft_account_id = accounts.main_account_ref
     elif fallback_account_id:
-        account_id = fallback_account_id
+        draft_account_id = fallback_account_id
+
+    hsn_map = (accounts.hsn_account_map or {}) if accounts else {}
 
     # Build line items from invoice
     line_items_raw = []
@@ -47,26 +51,33 @@ def invoice_to_zoho_bill(
 
     zoho_items = []
     for item in line_items_raw:
+        hsn = (item.get("hsn_or_sac") or item.get("hsn_sac_code") or item.get("hsn_code") or "").strip()
+        # Per-line account: HSN match → draft-level → integration fallback
+        line_account_id = hsn_map.get(hsn) or draft_account_id
+
         zi = {
             "name": item.get("description", "Invoice item"),
             "rate": item.get("unit_price") or item.get("amount", 0),
             "quantity": item.get("quantity", 1) or 1,
         }
-        if account_id:
-            zi["account_id"] = account_id
+        if line_account_id:
+            zi["account_id"] = line_account_id
+        # Zoho computes CGST/SGST/IGST automatically from this tax_id
+        if tax_id:
+            zi["tax_id"] = tax_id
         zoho_items.append(zi)
 
     if not zoho_items:
         amount = float(invoice.total_amount) if invoice.total_amount else 0.0
-        zoho_items.append({
+        zi = {
             "name": f"Invoice {invoice.invoice_number or invoice.file_name or 'item'}",
             "rate": amount, "quantity": 1,
-            **({"account_id": account_id} if account_id else {}),
-        })
-
-    # Note: Zoho Books handles tax via tax_id on line items, not separate line items.
-    # Tax is NOT added as separate line items for Zoho (unlike Tally/QuickBooks).
-    # Zoho's tax module manages CGST/SGST/IGST automatically based on GST settings.
+        }
+        if draft_account_id:
+            zi["account_id"] = draft_account_id
+        if tax_id:
+            zi["tax_id"] = tax_id
+        zoho_items.append(zi)
 
     payload = {
         "vendor_id": vendor_id,
@@ -86,5 +97,20 @@ def invoice_to_zoho_bill(
     return payload
 
 
-def build_vendor_payload(vendor_name: str, gst_number: str = None) -> dict:
-    return {"contact_name": vendor_name, "contact_type": "vendor"}
+def build_vendor_payload(vendor_name: str, gst_number: str = None,
+                         pan_number: str = None, address: str = None) -> dict:
+    payload = {"contact_name": vendor_name, "contact_type": "vendor"}
+
+    if gst_number:
+        payload["gst_no"] = gst_number
+        # "business_gst" = Registered Business - Regular
+        # Zoho auto-derives source_of_supply from the GST state code
+        payload["gst_treatment"] = "business_gst"
+
+    if pan_number:
+        payload["pan_no"] = pan_number
+
+    if address:
+        payload["billing_address"] = {"address": address}
+
+    return payload

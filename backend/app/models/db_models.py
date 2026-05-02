@@ -142,9 +142,11 @@ class InvoiceRecord(Base):
     total_amount = Column(Numeric(15, 2), nullable=True)
     tax_amount = Column(Numeric(15, 2), nullable=True)
     subtotal = Column(Numeric(15, 2), nullable=True)
-    gst_number = Column(String(20), nullable=True)
-    buyer_gst_number = Column(String(20), nullable=True)
-    pan_number = Column(String(15), nullable=True)
+    gst_number = Column(String(20), nullable=True)       # vendor/seller GSTIN
+    buyer_gst_number = Column(String(20), nullable=True) # buyer/company GSTIN
+    pan_number = Column(String(15), nullable=True)       # vendor/seller PAN
+    buyer_pan_number = Column(String(15), nullable=True) # buyer/company PAN
+    vendor_address = Column(Text, nullable=True)         # vendor/seller full address
     uan_number = Column(String(20), nullable=True)
     currency = Column(String(5), default="INR")
     line_items_json = Column(Text, nullable=True)

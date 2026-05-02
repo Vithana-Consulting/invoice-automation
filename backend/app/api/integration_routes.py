@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from typing import Optional
 
 from app.auth.dependencies import get_optional_user
+from app.config import settings
 from app.db.repository import IntegrationRepository
 from app.db.session import get_db
 from app.models.db_models import User
@@ -19,6 +22,7 @@ from app.platforms.base import (
     get_platform_class,
     test_platform,
 )
+from app.platforms.zoho.auth import ZohoAuth
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -216,6 +220,100 @@ def toggle_integration(integration_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Integration not found")
     updated = repo.update(integration_id, is_enabled=not integration.is_enabled)
     return {"status": "success", "data": _integration_to_dict(updated)}
+
+
+# ── Zoho OAuth flow ───────────────────────────────────────────────────────────
+
+ZOHO_SCOPES = "ZohoBooks.fullaccess.all"
+
+
+@router.get("/zoho/oauth/authorize")
+def zoho_oauth_authorize(
+    integration_id: int = Query(..., description="ID of the saved Zoho integration"),
+    db: Session = Depends(get_db),
+):
+    """Return the Zoho OAuth authorization URL. Redirect the user to this URL to begin the flow."""
+    repo = IntegrationRepository(db)
+    integration = repo.get_by_id(integration_id)
+    if not integration or integration.platform != "zoho":
+        raise HTTPException(status_code=404, detail="Zoho integration not found")
+
+    config = decrypt_config(integration.config_encrypted)
+    client_id = config.get("client_id", "")
+    redirect_uri = config.get("redirect_uri", "")
+    auth_url = config.get("auth_url", "https://accounts.zoho.in/oauth/v2/token")
+
+    if not client_id or not redirect_uri:
+        raise HTTPException(
+            status_code=400,
+            detail="client_id and redirect_uri must be saved in the integration config before authorising.",
+        )
+
+    # Use token endpoint host to derive the auth endpoint
+    authorize_base = auth_url.replace("/oauth/v2/token", "/oauth/v2/auth")
+
+    params = {
+        "scope": ZOHO_SCOPES,
+        "client_id": client_id,
+        "response_type": "code",
+        "redirect_uri": redirect_uri,
+        "access_type": "offline",
+        "prompt": "consent",  # forces Zoho to always return a refresh_token
+        "state": str(integration_id),
+    }
+    full_url = f"{authorize_base}?{urlencode(params)}"
+    logger.info("Zoho OAuth authorize URL generated for integration %d", integration_id)
+    return {"status": "success", "data": {"authorize_url": full_url}}
+
+
+@router.get("/zoho/oauth/callback")
+def zoho_oauth_callback(
+    code: str = Query(...),
+    state: str = Query(...),
+    db: Session = Depends(get_db),
+):
+    """Zoho redirects here after user grants access.
+    Exchanges the grant code for a refresh token and saves it to the integration.
+    Then redirects the browser back to the frontend integrations page.
+    """
+    try:
+        integration_id = int(state)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid state parameter")
+
+    repo = IntegrationRepository(db)
+    integration = repo.get_by_id(integration_id)
+    if not integration or integration.platform != "zoho":
+        raise HTTPException(status_code=404, detail="Zoho integration not found")
+
+    config = decrypt_config(integration.config_encrypted)
+    client_id = config.get("client_id", "")
+    client_secret = config.get("client_secret", "")
+    redirect_uri = config.get("redirect_uri", "")
+    auth_url = config.get("auth_url", "https://accounts.zoho.in/oauth/v2/token")
+
+    try:
+        token_data = ZohoAuth.exchange_code(
+            client_id=client_id,
+            client_secret=client_secret,
+            code=code,
+            redirect_uri=redirect_uri,
+            auth_url=auth_url,
+        )
+    except Exception as e:
+        logger.error("Zoho code exchange failed for integration %d: %s", integration_id, e)
+        frontend_url = getattr(settings, "FRONTEND_URL", "http://localhost:3004")
+        return RedirectResponse(
+            url=f"{frontend_url}/integrations?zoho_error={str(e)[:120]}"
+        )
+
+    # Persist the refresh token into the existing config
+    config["refresh_token"] = token_data["refresh_token"]
+    repo.update(integration_id, config_encrypted=encrypt_config(config), is_enabled=True)
+    logger.info("Zoho refresh token saved for integration %d", integration_id)
+
+    frontend_url = getattr(settings, "FRONTEND_URL", "http://localhost:3004")
+    return RedirectResponse(url=f"{frontend_url}/integrations?zoho_connected=1")
 
 
 def _integration_to_dict(i) -> dict:

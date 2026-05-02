@@ -40,14 +40,23 @@ def list_accounts(
     type: str = Query(None, description="Filter by account type"),
     sub_type: str = Query(None, description="Filter by sub_type tag"),
     active_only: bool = Query(True),
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     repo = ChartOfAccountRepository(db)
-    accounts = repo.list_all(platform=platform, type_filter=type, sub_type=sub_type, active_only=active_only) # AI_RECOMMENDATION : Batch fetch it, batch size 50
+    accounts = repo.list_all(
+        platform=platform, type_filter=type, sub_type=sub_type,
+        active_only=active_only, limit=limit, offset=offset,
+    )
+    total = repo.count(platform=platform, type_filter=type, sub_type=sub_type, active_only=active_only)
     return {
         "status": "success",
         "data": [_account_to_dict(a) for a in accounts],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
     }
 
 

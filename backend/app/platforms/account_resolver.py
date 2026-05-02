@@ -28,6 +28,12 @@ class ResolvedAccounts:
     cgst_amount: float = 0
     sgst_amount: float = 0
     igst_amount: float = 0
+    # Per-line-item: hsn_code → platform_account_id
+    hsn_account_map: dict = None
+
+    def __post_init__(self):
+        if self.hsn_account_map is None:
+            self.hsn_account_map = {}
 
     @property
     def has_tax_lines(self) -> bool:
@@ -37,25 +43,49 @@ class ResolvedAccounts:
 def resolve_accounts_for_platform(draft, platform: str, db: Session) -> ResolvedAccounts:
     """Look up the correct platform account IDs for a draft.
 
-    Uses the synced COA entries tagged with sub_type and is_default.
+    Resolution priority per line item:
+      1. HSN/SAC code match in Chart of Accounts (hsn_codes field)
+      2. Draft's assigned account (account_id → platform_account_id)
+      3. Default PURCHASE account for this platform (is_default + sub_type=PURCHASE)
     """
     result = ResolvedAccounts()
     coa_repo = ChartOfAccountRepository(db)
 
-    # 1. Resolve main account (expense/income)
+    # 1. Build per-HSN account map from invoice line items
+    invoice = getattr(draft, "invoice", None)
+    if invoice and invoice.line_items_json:
+        try:
+            line_items = json.loads(invoice.line_items_json)
+            logger.info("[COA] Invoice %s has %d line items", getattr(invoice, "id", "?"), len(line_items))
+            for item in line_items:
+                hsn = (item.get("hsn_or_sac") or item.get("hsn_sac_code") or item.get("hsn_code") or "").strip()
+                logger.info("[COA] Line item '%s' HSN='%s'", item.get("description", "")[:40], hsn)
+                if hsn and hsn not in result.hsn_account_map:
+                    coa = coa_repo.get_by_hsn(hsn, platform)
+                    if coa:
+                        result.hsn_account_map[hsn] = coa.platform_account_id
+                        logger.info("[COA] HSN '%s' → '%s' (%s)", hsn, coa.name, coa.platform_account_id)
+                    else:
+                        logger.info("[COA] HSN '%s' → no match on platform=%s", hsn, platform)
+                elif not hsn:
+                    logger.info("[COA] Line item has no HSN code")
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.warning("[COA] Failed to parse line_items_json: %s", e)
+    else:
+        logger.info("[COA] No line_items_json on invoice")
+
+    # 2. Resolve draft-level main account (expense/income)
     if draft.account_id and draft.account:
-        # The assigned account already has a platform_account_id
         if draft.account.platform == platform:
             result.main_account_ref = draft.account.platform_account_id
         else:
-            # Account is from a different platform — find equivalent on target platform
             sub = draft.account.sub_type or "PURCHASE"
             fallback = coa_repo.get_default(sub, platform)
             if fallback:
                 result.main_account_ref = fallback.platform_account_id
 
+    # 3. Fall back to default PURCHASE account for this platform
     if not result.main_account_ref:
-        # No account assigned — use default PURCHASE/SALE for this platform
         sub = "PURCHASE" if draft.invoice_type != "OUTBOUND" else "SALE"
         default = coa_repo.get_default(sub, platform)
         if default:

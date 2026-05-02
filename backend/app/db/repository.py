@@ -127,6 +127,8 @@ class InvoiceRepository(TenantBaseRepository):
             "gst_number": invoice.gst_number,
             "buyer_gst_number": invoice.buyer_gst_number,
             "pan_number": invoice.pan_number,
+            "buyer_pan_number": invoice.buyer_pan_number,
+            "vendor_address": invoice.vendor_address,
             "uan_number": invoice.uan_number,
             "currency": invoice.currency,
             "line_items_json": json.dumps([item.model_dump() for item in invoice.line_items]) if invoice.line_items else None,
@@ -475,7 +477,8 @@ class ChartOfAccountRepository(TenantBaseRepository):
         return None
 
     def list_all(self, platform: str = None, type_filter: str = None,
-                 sub_type: str = None, active_only: bool = True) -> List[ChartOfAccount]:
+                 sub_type: str = None, active_only: bool = True,
+                 limit: int = None, offset: int = 0) -> List[ChartOfAccount]:
         query = self._base_query()
         if active_only:
             query = query.filter(ChartOfAccount.is_active == True)
@@ -485,7 +488,23 @@ class ChartOfAccountRepository(TenantBaseRepository):
             query = query.filter(ChartOfAccount.type == type_filter)
         if sub_type:
             query = query.filter(ChartOfAccount.sub_type == sub_type)
-        return query.order_by(ChartOfAccount.platform, ChartOfAccount.code, ChartOfAccount.name).all()
+        query = query.order_by(ChartOfAccount.platform, ChartOfAccount.code, ChartOfAccount.name)
+        if limit is not None:
+            query = query.offset(offset).limit(limit)
+        return query.all()
+
+    def count(self, platform: str = None, type_filter: str = None,
+              sub_type: str = None, active_only: bool = True) -> int:
+        query = self._base_query()
+        if active_only:
+            query = query.filter(ChartOfAccount.is_active == True)
+        if platform:
+            query = query.filter(ChartOfAccount.platform == platform)
+        if type_filter:
+            query = query.filter(ChartOfAccount.type == type_filter)
+        if sub_type:
+            query = query.filter(ChartOfAccount.sub_type == sub_type)
+        return query.count()
 
     def update(self, account_id: int, **kwargs) -> Optional[ChartOfAccount]:
         return self._update(account_id, **kwargs)

@@ -1,7 +1,8 @@
-# Environment variables - NEVER commit these
+# Environment variables and credentials - NEVER commit these
 .env
 .env.*
 *.env
+creds.txt
 
 # Python
 __pycache__/
@@ -46,3 +47,7 @@ coverage/
 # Docker volumes / data
 postgres_data/
 redis_data/
+
+# Runtime data (SQLite DB, uploaded attachments, generated configs)
+backend/data/*.db
+backend/data/attachments/

@@ -71,7 +71,9 @@ class ZohoBilling(BillingPlatform):
             }
 
     def push_bill(self, draft: Any, db: Session) -> Dict[str, Any]:
-        # AI_RECOMMENDATION , AI_RESEARCH , AI_USER_VALIDATION_BEFORE_IMPLEMENTATION : ALL THE WORKFLOW FOR NOW, WORKS FOR INVOICES MEANING bills in zoho not sales. so the i/(s & c)gst. has to be pushed to the inbound gsts (look at how a single bill with i/(s&c)gsts included in the amount gets created as a new bill inbound expense coa, for more context refer the zoho's working and auditors' mindset on this)
+        # GST handling: tax_id is set on each line item; Zoho automatically computes
+        # CGST/SGST/IGST based on its configured tax rates (Option A — Zoho-managed taxes).
+        # Configure the tax_id via the Zoho integration settings in the UI.
         from app.db.repository import VendorMappingRepository
 
         invoice = draft.invoice
@@ -100,13 +102,61 @@ class ZohoBilling(BillingPlatform):
         from app.platforms.account_resolver import resolve_accounts_for_platform
         accounts = resolve_accounts_for_platform(draft, "zoho", db)
 
-        # Build and push (COA accounts take priority, fallback to config default)
-        payload = invoice_to_zoho_bill(
-            invoice, vendor_id,
-            accounts=accounts,
-            fallback_account_id=self.client.default_account_id,
-        )
-        result = self.client.create_bill(payload)
+        # Fail fast if no account can be resolved for any line item.
+        # A bill is pushable if: any HSN is mapped, OR a draft-level account exists,
+        # OR the integration has a default_account_id.
+        has_hsn_match = bool(accounts and accounts.hsn_account_map)
+        has_draft_account = bool(accounts and accounts.main_account_ref)
+        has_default = bool(self.client.default_account_id)
+        if not (has_hsn_match or has_draft_account or has_default):
+            raise Exception(
+                "No Chart of Accounts mapping found for this bill. "
+                "Go to Chart of Accounts, tag the relevant account with the HSN/SAC codes from this invoice, "
+                "or set a Default Account ID in Integrations → Zoho Books."
+            )
+
+        tax_id = self.config.get("tax_id") or ""
+        igst_tax_id = self.config.get("igst_tax_id") or ""
+
+        # Build payload with default (intra-state) tax first; retry with IGST if Zoho disagrees.
+        def _try_push(use_tax_id: str) -> dict:
+            payload = invoice_to_zoho_bill(
+                invoice, vendor_id,
+                accounts=accounts,
+                fallback_account_id=self.client.default_account_id,
+                tax_id=use_tax_id or None,
+            )
+            return self.client.create_bill(payload)
+
+        from app.core.exceptions import ZohoError
+        try:
+            result = _try_push(tax_id)
+        except ZohoError as e:
+            msg = str(e).lower()
+            if "igst has to be applied" in msg and igst_tax_id:
+                # Inter-state transaction — retry with IGST tax
+                logger.info("Retrying with IGST tax_id=%s (inter-state)", igst_tax_id)
+                try:
+                    result = _try_push(igst_tax_id)
+                except ZohoError as e2:
+                    if "already been created" in str(e2).lower():
+                        bill_number = invoice.invoice_number or f"BILL-{invoice.id}"
+                        existing = self.client.find_bill_by_number(bill_number)
+                        if existing:
+                            logger.info("Bill already in Zoho: %s", existing.get("bill_id"))
+                            return {"external_id": existing["bill_id"], "platform": "zoho"}
+                    raise
+            elif "already been created" in msg:
+                # Duplicate bill — find and return the existing bill ID
+                bill_number = invoice.invoice_number or f"BILL-{invoice.id}"
+                existing = self.client.find_bill_by_number(bill_number)
+                if existing:
+                    logger.info("Bill already in Zoho (dedup): %s", existing.get("bill_id"))
+                    return {"external_id": existing["bill_id"], "platform": "zoho"}
+                raise
+            else:
+                raise
+
         bill = result.get("bill", {})
         return {"external_id": bill.get("bill_id", ""), "platform": "zoho"}
 
@@ -160,8 +210,12 @@ class ZohoBilling(BillingPlatform):
         return None
 
     def create_vendor(self, vendor_name: str, **kwargs) -> str:
-        payload = build_vendor_payload(vendor_name, kwargs.get("gst_number"))
-        # AI_RECOMMENDATION : while creating an vendor, mandatory fields are name, address, gst, pan
+        payload = build_vendor_payload(
+            vendor_name,
+            gst_number=kwargs.get("gst_number"),
+            pan_number=kwargs.get("pan_number"),
+            address=kwargs.get("address"),
+        )
         result = self.client.create_contact(payload)
         return result.get("contact", {}).get("contact_id", "")
 
@@ -170,7 +224,11 @@ class ZohoBilling(BillingPlatform):
         return [
             {"key": "client_id", "label": "Client ID", "type": "text", "required": True},
             {"key": "client_secret", "label": "Client Secret", "type": "password", "required": True},
-            {"key": "refresh_token", "label": "Refresh Token", "type": "password", "required": True},
+            {"key": "redirect_uri", "label": "Redirect URI", "type": "text", "required": True,
+             "help": "Must match exactly what you registered in the Zoho API Console. "
+                     "Use: http://localhost:8000/api/integrations/zoho/oauth/callback"},
+            {"key": "refresh_token", "label": "Refresh Token", "type": "password", "required": False,
+             "help": "Auto-filled after you click 'Authorise with Zoho'. Leave blank before authorising."},
             {"key": "organization_id", "label": "Organization ID", "type": "text", "required": True},
             {"key": "base_url", "label": "API Base URL", "type": "text", "required": True,
              "default": "https://www.zohoapis.in/books/v3"},
@@ -178,4 +236,12 @@ class ZohoBilling(BillingPlatform):
              "default": "https://accounts.zoho.in/oauth/v2/token"},
             {"key": "default_account_id", "label": "Default Account ID (Chart of Accounts)", "type": "text",
              "required": False},
+            {"key": "tax_id", "label": "GST Tax ID — Intra-state (CGST+SGST)", "type": "text",
+             "required": False,
+             "help": "Zoho tax rate ID for intra-state purchases (auto-splits into CGST+SGST). "
+                     "Find in Zoho Books → Settings → Taxes."},
+            {"key": "igst_tax_id", "label": "IGST Tax ID — Inter-state", "type": "text",
+             "required": False,
+             "help": "Zoho tax rate ID for inter-state purchases (IGST). "
+                     "Auto-selected when the invoice has IGST amounts."},
         ]

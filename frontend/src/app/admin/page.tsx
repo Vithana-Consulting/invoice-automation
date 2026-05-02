@@ -24,6 +24,7 @@ export default function AdminPage() {
   const [oauthError, setOauthError] = useState('');
 
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [flushingId, setFlushingId] = useState<number | null>(null);
 
   // Use a ref-like pattern: store adminKey in a variable that persists across calls
   const adminFetch = async (path: string, options?: RequestInit) => {
@@ -90,6 +91,17 @@ export default function AdminPage() {
         setMessage({ type: 'error', text: data.message });
       }
     } catch (e: any) { setMessage({ type: 'error', text: e.message }); }
+  };
+
+  const truncateCompany = async (companyId: number, companyName: string) => {
+    if (!confirm(`Truncate all invoice data for "${companyName}"?\n\nThis deletes all invoices, drafts, emails, rules, vendor data and audit logs — but keeps the company, members and integrations.`)) return;
+    setFlushingId(companyId);
+    setMessage(null);
+    try {
+      const data = await adminFetch(`/api/admin/companies/${companyId}/flush`, { method: 'POST' });
+      setMessage({ type: data.status === 'success' ? 'success' : 'error', text: data.message });
+    } catch (e: any) { setMessage({ type: 'error', text: e.message }); }
+    finally { setFlushingId(null); }
   };
 
   const deleteCompany = async (companyId: number, companyName: string) => {
@@ -236,6 +248,12 @@ export default function AdminPage() {
                       <button onClick={() => openOAuthForm(c.id)}
                         className="px-3 py-1.5 text-xs font-medium text-primary-600 border border-primary-200 rounded-lg hover:bg-primary-50">
                         {c.oauth_configured ? 'Edit OAuth' : 'Configure OAuth'}
+                      </button>
+                      <button
+                        onClick={() => truncateCompany(c.id, c.name)}
+                        disabled={flushingId === c.id}
+                        className="px-3 py-1.5 text-xs font-medium text-orange-600 border border-orange-200 rounded-lg hover:bg-orange-50 disabled:opacity-50">
+                        {flushingId === c.id ? 'Truncating...' : 'Truncate'}
                       </button>
                       <button onClick={() => deleteCompany(c.id, c.name)}
                         className="px-3 py-1.5 text-xs font-medium text-red-600 border border-red-200 rounded-lg hover:bg-red-50">

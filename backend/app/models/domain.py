@@ -48,9 +48,11 @@ class Invoice(BaseModel):
     line_items: List[LineItem] = Field(default_factory=list)
     tax_breakup: Optional[TaxBreakup] = None
     bank_details: Optional[BankDetails] = None
-    buyer_gst_number: Optional[str] = None
-    gst_number: Optional[str] = None
-    pan_number: Optional[str] = None
+    buyer_gst_number: Optional[str] = None  # GSTIN of the buyer (our company)
+    gst_number: Optional[str] = None        # GSTIN of the vendor/seller
+    pan_number: Optional[str] = None        # PAN of the vendor/seller
+    buyer_pan_number: Optional[str] = None  # PAN of the buyer (our company)
+    vendor_address: Optional[str] = None    # Full address of the vendor/seller
     uan_number: Optional[str] = None
     currency: str = "INR"
     notes: Optional[str] = None

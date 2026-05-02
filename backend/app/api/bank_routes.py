@@ -38,7 +38,7 @@ def list_bank_details(
         .order_by(InvoiceRecord.created_at.desc())
         .limit(limit)
         .all()
-    ) # AI_RECOMMENDATION : does it fetches the invoice in a single query or batch fetches it?
+    )
 
     results = []
     for inv in invoices:

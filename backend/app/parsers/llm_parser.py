@@ -40,6 +40,7 @@ EXTRACTION_PROMPT = """You are an invoice data extraction system. Extract struct
 Return ONLY valid JSON with these fields (use null for missing fields):
 {
   "vendor_name": "The company/business that ISSUED this invoice (the seller, not the buyer)",
+  "vendor_address": "Full address of the vendor/seller (street, city, state, pincode) or null",
   "buyer_name": "The company/person the invoice is billed TO (the buyer/customer)",
   "invoice_number": "The invoice/bill number",
   "invoice_date": "Date in YYYY-MM-DD format",
@@ -48,9 +49,10 @@ Return ONLY valid JSON with these fields (use null for missing fields):
   "tax_amount": 0.00,
   "subtotal": 0.00,
   "currency": "INR or USD or EUR or GBP",
-  "gst_number": "GSTIN of the seller or null",
-  "buyer_gst_number": "GSTIN of the buyer or null",
-  "pan_number": "PAN of the seller or null",
+  "gst_number": "GSTIN of the seller/vendor or null",
+  "buyer_gst_number": "GSTIN of the buyer/recipient (Billed To / Ship To / Customer GSTIN) or null",
+  "pan_number": "PAN of the seller/vendor or null",
+  "buyer_pan_number": "PAN of the buyer/recipient or null",
   "tax_breakup": {
     "cgst_rate": null,
     "cgst_amount": null,
@@ -90,6 +92,7 @@ IMPORTANT:
 - Extract CGST, SGST, IGST amounts separately in tax_breakup (look for tax summary table)
 - Extract bank/payment details if present on the invoice (often at the bottom)
 - If this is not an invoice (e.g., receipt, ticket, form), still extract what you can
+- hsn_or_sac: look for columns labelled "HSN", "SAC", "HSN/SAC", "HSN Code", "SAC Code" on every line item row. For Indian service invoices, SAC codes are 6-digit numbers (e.g. 998211, 998314). Extract even if the column header is abbreviated. If no code is printed on a line item, return null for that item.
 - Return ONLY the JSON object, no other text"""
 
 
@@ -254,6 +257,7 @@ class LLMParser(InvoiceParser):
         return Invoice(
             invoice_number=data.get("invoice_number"),
             vendor_name=data.get("vendor_name"),
+            vendor_address=data.get("vendor_address"),
             date=data.get("invoice_date"),
             due_date=data.get("due_date"),
             total_amount=float(data["total_amount"]) if data.get("total_amount") else None,
@@ -264,7 +268,8 @@ class LLMParser(InvoiceParser):
             bank_details=bank_details,
             buyer_gst_number=data.get("buyer_gst_number"),
             gst_number=data.get("gst_number"),
-            pan_number=data.get("pan_number"), # AI_RECOMMENDATION : add the buyer and vendor's gst and pan.
+            pan_number=data.get("pan_number"),
+            buyer_pan_number=data.get("buyer_pan_number"),
             currency=data.get("currency", "INR"),
             parser_mode=f"llm:{provider_name}/{model}",
             confidence_scores={"llm": 0.95, "vendor_name": 0.95, "total_amount": 0.95},

@@ -192,6 +192,12 @@ def bulk_push_drafts(body: dict, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Maximum 500 drafts per bulk operation")
     repo = DraftRepository(db)
     mapping_repo = VendorMappingRepository(db)
+
+    # Pre-instantiate one platform instance per platform key so the OAuth token
+    # is refreshed once and reused across all drafts — avoids Zoho rate-limiting.
+    from app.platforms.base import get_billing_platform
+    platform_cache: dict = {}
+
     results = []
     for draft_id in draft_ids:
         try:
@@ -216,7 +222,12 @@ def bulk_push_drafts(body: dict, db: Session = Depends(get_db)):
             if vendor_mapping.canonical_name:
                 repo.update(draft_id, resolved_vendor_name=vendor_mapping.canonical_name)
 
-            result = _push_draft_to_platform(draft, db)
+            # Reuse cached platform instance (shared token across bulk push)
+            if draft.push_to not in platform_cache:
+                platform_cache[draft.push_to] = get_billing_platform(db, draft.push_to)
+            platform = platform_cache[draft.push_to]
+
+            result = platform.push_bill(draft, db)
             repo.update(draft_id, status="PUSHED", external_bill_id=result.get("external_id", ""), push_error=None, pushed_at=datetime.utcnow())
             results.append({"draft_id": draft_id, "success": True, "external_bill_id": result.get("external_id")})
         except Exception as e:
@@ -272,7 +283,18 @@ def apply_rules_to_drafts(body: dict = None, db: Session = Depends(get_db)):
         drafts = [repo.get_by_id(did) for did in draft_ids]
         drafts = [d for d in drafts if d]
     else:
-        drafts = repo.list_all(status="PENDING_REVIEW", limit=500) # AI_RECOMMENDATION : batch it and get 50 per batch
+        # Batch process in chunks of 50 to avoid loading all pending drafts at once
+        BATCH_SIZE = 50
+        drafts = []
+        offset = 0
+        while True:
+            batch = repo.list_all(status="PENDING_REVIEW", limit=BATCH_SIZE, offset=offset)
+            if not batch:
+                break
+            drafts.extend(batch)
+            if len(batch) < BATCH_SIZE:
+                break
+            offset += BATCH_SIZE
 
     matched = 0
     skipped = 0
