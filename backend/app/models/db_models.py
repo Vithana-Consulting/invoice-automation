@@ -159,6 +159,8 @@ class InvoiceRecord(Base):
     validation_errors = Column(Text, nullable=True)
     confidence_scores = Column(Text, nullable=True)
 
+    place_of_supply = Column(String(5), nullable=True)
+
     # Source tracking
     source = Column(String(50), default="gmail")
     source_ref = Column(String(255), nullable=True)
@@ -189,8 +191,8 @@ class VendorCache(Base):
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
 
-class AuditLog(Base):
-    """Tracks all significant actions for debugging and compliance."""
+class LegacyAuditLog(Base):
+    """Tracks all significant actions for debugging and compliance (legacy table)."""
     __tablename__ = "audit_log"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -222,6 +224,8 @@ class VendorMapping(Base):
     created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    is_composition_vendor = Column(Boolean, default=False, nullable=False, server_default="0")
 
     creator = relationship("User", foreign_keys=[created_by])
 
@@ -286,10 +290,14 @@ class InvoiceDraft(Base):
     push_error = Column(Text, nullable=True)
     pushed_at = Column(DateTime, nullable=True)
     external_bill_id = Column(String(255), nullable=True)
-    validation_warnings = Column(Text, nullable=True)  # JSON array of {code, message}
+    validation_warnings = Column(Text, nullable=True)  # JSON array of {code, message} — parsing warnings
+    validation_errors = Column(Text, nullable=True)   # JSON array of ValidationResult dicts from pre-push check
     tax_breakup_json = Column(Text, nullable=True)
     invoice_type = Column(String(20), nullable=True)  # INBOUND | OUTBOUND
     account_id = Column(Integer, ForeignKey("chart_of_accounts.id"), nullable=True)
+    place_of_supply = Column(String(5), nullable=True)   # 2-char GST state code
+    itc_status = Column(String(20), nullable=True, default="UNCONFIRMED")  # UNCONFIRMED/CONFIRMED/INELIGIBLE/NA
+    tds_applicable = Column(Boolean, nullable=True)      # manual checkbox
 
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -376,3 +384,39 @@ class Integration(Base):
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     creator = relationship("User", foreign_keys=[created_by])
+
+
+class ExtractionLog(Base):
+    """Immutable record of raw LLM extraction output per invoice.
+
+    Insert-only — never updated. Retained per S.36 CGST Act (72-month).
+    """
+    __tablename__ = "extraction_logs"
+
+    id             = Column(Integer, primary_key=True, autoincrement=True)
+    company_id     = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    invoice_id     = Column(Integer, ForeignKey("invoices.id"), nullable=False, index=True)
+    raw_llm_json   = Column(Text, nullable=False)          # immutable — written once
+    parser_mode    = Column(String(100), nullable=True)
+    created_at     = Column(DateTime, nullable=False, default=datetime.utcnow)
+    # NOTE: no updated_at — this table is append-only per S.36 CGST Act (72-month retention)
+
+
+class AuditLog(Base):
+    """Immutable audit trail for push overrides and compliance-critical actions.
+
+    Insert-only — never updated or deleted.
+    """
+    __tablename__ = "audit_logs"
+
+    id                   = Column(Integer, primary_key=True, autoincrement=True)
+    company_id           = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    entity_type          = Column(String(50), nullable=False)  # "invoice_draft", "vendor_mapping"
+    entity_id            = Column(Integer, nullable=False, index=True)
+    action               = Column(String(100), nullable=False)  # "push_override", "reconciliation_override"
+    actor_id             = Column(Integer, ForeignKey("users.id"), nullable=True)
+    override_reason_code = Column(String(100), nullable=True)
+    override_reason      = Column(Text, nullable=True)
+    metadata_json        = Column(Text, nullable=True)
+    created_at           = Column(DateTime, nullable=False, default=datetime.utcnow)
+    # NOTE: no updated_at, no soft delete — immutable audit record

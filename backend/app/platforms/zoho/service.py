@@ -219,10 +219,18 @@ class ZohoBilling(BillingPlatform):
             return []
 
     def find_vendor(self, vendor_name: str) -> Optional[str]:
+        from app.utils.vendor_name_utils import is_match
         try:
+            # Try exact search first
             contacts = self.client.list_contacts(contact_name=vendor_name)
             for c in contacts:
                 if c.get("contact_name", "").lower() == vendor_name.lower():
+                    return c["contact_id"]
+            # Fuzzy: fetch all vendors, normalise and compare
+            all_contacts = self.client.list_contacts()
+            for c in all_contacts:
+                if is_match(c.get("contact_name", ""), vendor_name):
+                    logger.info("Fuzzy vendor match: '%s' → '%s'", vendor_name, c.get("contact_name"))
                     return c["contact_id"]
         except Exception as e:
             logger.warning("Zoho vendor search failed: %s", e)

@@ -54,6 +54,7 @@ class Invoice(BaseModel):
     buyer_pan_number: Optional[str] = None  # PAN of the buyer (our company)
     vendor_address: Optional[str] = None    # Full address of the vendor/seller
     uan_number: Optional[str] = None
+    place_of_supply: Optional[str] = None
     currency: str = "INR"
     notes: Optional[str] = None
     raw_text: Optional[str] = None

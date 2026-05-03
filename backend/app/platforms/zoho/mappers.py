@@ -93,6 +93,15 @@ def invoice_to_zoho_bill(
     if d:
         payload["due_date"] = d
 
+    # Place of Supply: use invoice.place_of_supply, fallback to vendor state from GSTIN
+    from app.utils.gstin_utils import extract_state_code
+    pos = getattr(invoice, "place_of_supply", None)
+    if not pos:
+        vendor_gstin = getattr(invoice, "gst_number", "") or ""
+        pos = extract_state_code(vendor_gstin) or None
+    if pos:
+        payload["place_of_supply"] = pos
+
     payload["notes"] = f"Auto-imported from invoice {invoice.invoice_number or invoice.file_name}"
     return payload
 

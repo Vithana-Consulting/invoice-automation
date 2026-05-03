@@ -118,11 +118,22 @@ def reject_draft(
 
 
 @router.post("/{draft_id}/push")
-def push_draft(draft_id: int, db: Session = Depends(get_db)):
+def push_draft(
+    draft_id: int,
+    body: dict = None,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_optional_user),
+):
     """Push an approved draft to the designated billing platform.
 
     Credentials are loaded from the integrations table (configured via UI).
+    Runs pre-push validation before pushing. Blocking issues return HTTP 422
+    unless override_reason_code + override_reason are supplied in the request body.
     """
+    import json as _json
+    from app.services.validation.validators import build_pre_push_pipeline
+    from app.db.repository import VendorMappingRepository, ComplianceAuditLogRepository
+
     repo = DraftRepository(db)
     draft = repo.get_by_id(draft_id)
     if not draft:
@@ -133,7 +144,6 @@ def push_draft(draft_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="No target platform set (push_to is empty)")
 
     # Block push if no vendor mapping exists
-    from app.db.repository import VendorMappingRepository
     mapping_repo = VendorMappingRepository(db)
     vendor_mapping = mapping_repo.get_by_alias(draft.vendor_name or "", platform=draft.push_to)
     if not vendor_mapping:
@@ -146,6 +156,43 @@ def push_draft(draft_id: int, db: Session = Depends(get_db)):
     # Update resolved vendor name from mapping before pushing
     if vendor_mapping.canonical_name:
         repo.update(draft_id, resolved_vendor_name=vendor_mapping.canonical_name)
+        draft = repo.get_by_id(draft_id)  # refresh after update
+
+    # ─── Pre-push validation ───────────────────────────────────────────────
+    pipeline = build_pre_push_pipeline()
+    results = pipeline.run(draft, draft.invoice, db)
+    blocking = pipeline.blocking(results)
+
+    # Persist validation results on the draft
+    all_results_json = _json.dumps([
+        {"code": r.code, "passed": r.passed, "severity": r.severity, "message": r.message}
+        for r in results
+    ])
+    repo.update(draft_id, validation_errors=all_results_json)
+
+    if blocking:
+        override_code = (body or {}).get("override_reason_code", "")
+        override_reason = (body or {}).get("override_reason", "")
+
+        if not override_code:
+            raise HTTPException(status_code=422, detail={
+                "error": "VALIDATION_BLOCKED",
+                "blocks": [{"code": r.code, "message": r.message, "detail": r.detail} for r in blocking],
+                "hint": "To override, resubmit with override_reason_code and override_reason in the request body.",
+            })
+
+        # Log the override — immutable compliance record
+        audit_repo = ComplianceAuditLogRepository(db)
+        audit_repo.log(
+            entity_type="invoice_draft",
+            entity_id=draft_id,
+            action="push_override",
+            actor_id=user.id if user else None,
+            override_reason_code=override_code,
+            override_reason=override_reason,
+            metadata={"blocked_by": [r.code for r in blocking]},
+        )
+        db.commit()
 
     try:
         logger.info("Pushing draft %d to %s (vendor: %s)", draft_id, draft.push_to, vendor_mapping.canonical_name)
@@ -184,8 +231,14 @@ def bulk_approve_drafts(
 
 @router.post("/bulk-push")
 def bulk_push_drafts(body: dict, db: Session = Depends(get_db)):
-    """Bulk push multiple approved drafts."""
+    """Bulk push multiple approved drafts.
+
+    Runs pre-push validation on each draft. Drafts with blocking issues are
+    skipped (with a warning in results) rather than hard-blocking the whole batch.
+    """
+    import json as _json
     from app.db.repository import VendorMappingRepository
+    from app.services.validation.validators import build_pre_push_pipeline
 
     draft_ids = body.get("draft_ids", [])
     if len(draft_ids) > 500:
@@ -197,6 +250,7 @@ def bulk_push_drafts(body: dict, db: Session = Depends(get_db)):
     # is refreshed once and reused across all drafts — avoids Zoho rate-limiting.
     from app.platforms.base import get_billing_platform
     platform_cache: dict = {}
+    pipeline = build_pre_push_pipeline()
 
     results = []
     for draft_id in draft_ids:
@@ -221,6 +275,28 @@ def bulk_push_drafts(body: dict, db: Session = Depends(get_db)):
             # Update resolved name
             if vendor_mapping.canonical_name:
                 repo.update(draft_id, resolved_vendor_name=vendor_mapping.canonical_name)
+                draft = repo.get_by_id(draft_id)  # refresh
+
+            # ── Pre-push validation (bulk: skip blocking drafts, log warnings) ──
+            val_results = pipeline.run(draft, draft.invoice, db)
+            blocking = pipeline.blocking(val_results)
+            all_results_json = _json.dumps([
+                {"code": r.code, "passed": r.passed, "severity": r.severity, "message": r.message}
+                for r in val_results
+            ])
+            repo.update(draft_id, validation_errors=all_results_json)
+
+            if blocking:
+                block_codes = [r.code for r in blocking]
+                results.append({
+                    "draft_id": draft_id,
+                    "success": False,
+                    "error": f"Blocked by validation: {', '.join(block_codes)}",
+                    "validation_blocks": [
+                        {"code": r.code, "message": r.message} for r in blocking
+                    ],
+                })
+                continue
 
             # Reuse cached platform instance (shared token across bulk push)
             if draft.push_to not in platform_cache:

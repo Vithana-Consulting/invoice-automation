@@ -20,9 +20,11 @@ from app.models.db_models import (
     ChartOfAccount,
     Company,
     CompanyMember,
+    ExtractionLog,
     InvoiceDraft,
     InvoiceRecord,
     Integration,
+    LegacyAuditLog,
     PlatformVendor,
     ProcessedEmail,
     Rule,
@@ -138,6 +140,7 @@ class InvoiceRepository(TenantBaseRepository):
             "parser_mode": parser_mode,
             "parsing_status": "PARSED",
             "confidence_scores": json.dumps(invoice.confidence_scores) if invoice.confidence_scores else None,
+            "place_of_supply": getattr(invoice, "place_of_supply", None),
         }
         return self._update(invoice_id, **updates)
 
@@ -164,13 +167,13 @@ class VendorCacheRepository(TenantBaseRepository):
 
 
 class AuditLogRepository(TenantBaseRepository):
-    """Audit trail for all significant actions."""
-    model = AuditLog
+    """Audit trail for all significant actions (legacy table)."""
+    model = LegacyAuditLog
 
     def log(self, entity_type: str, entity_id: int, action: str,
             details: dict = None, status: str = "success", error: str = None):
         """Create an audit log entry, scoped to the current tenant."""
-        record = AuditLog(
+        record = LegacyAuditLog(
             entity_type=entity_type,
             entity_id=entity_id,
             action=action,
@@ -180,8 +183,8 @@ class AuditLogRepository(TenantBaseRepository):
         )
         return self._create(record)
 
-    def list_recent(self, limit: int = 20) -> List[AuditLog]:
-        return self._base_query().order_by(AuditLog.created_at.desc()).limit(limit).all()
+    def list_recent(self, limit: int = 20) -> List[LegacyAuditLog]:
+        return self._base_query().order_by(LegacyAuditLog.created_at.desc()).limit(limit).all()
 
 
 class VendorMappingRepository(TenantBaseRepository):
@@ -545,3 +548,50 @@ class ChartOfAccountRepository(TenantBaseRepository):
                 )
                 created += 1
         return {"created": created, "updated": updated, "total": created + updated}
+
+
+class ExtractionLogRepository(TenantBaseRepository):
+    """Append-only extraction log — one record per invoice parse (S.36 CGST Act retention)."""
+    model = ExtractionLog
+
+    def create(self, invoice_id: int, raw_llm_json: str, parser_mode: str = None) -> ExtractionLog:
+        record = ExtractionLog(
+            invoice_id=invoice_id,
+            raw_llm_json=raw_llm_json,
+            parser_mode=parser_mode,
+        )
+        self.db.add(record)
+        self._stamp(record)
+        self.db.flush()
+        return record
+
+    def get_by_invoice(self, invoice_id: int) -> List[ExtractionLog]:
+        return self._base_query().filter(ExtractionLog.invoice_id == invoice_id).order_by(ExtractionLog.created_at).all()
+
+
+class ComplianceAuditLogRepository(TenantBaseRepository):
+    """Immutable audit trail for push overrides and compliance-critical actions."""
+    model = AuditLog
+
+    def log(self, entity_type: str, entity_id: int, action: str,
+            actor_id: int = None, override_reason_code: str = None,
+            override_reason: str = None, metadata: dict = None) -> AuditLog:
+        record = AuditLog(
+            entity_type=entity_type,
+            entity_id=entity_id,
+            action=action,
+            actor_id=actor_id,
+            override_reason_code=override_reason_code,
+            override_reason=override_reason,
+            metadata_json=json.dumps(metadata) if metadata else None,
+        )
+        self.db.add(record)
+        self._stamp(record)
+        self.db.flush()
+        return record
+
+    def get_by_entity(self, entity_type: str, entity_id: int) -> List[AuditLog]:
+        return self._base_query().filter(
+            AuditLog.entity_type == entity_type,
+            AuditLog.entity_id == entity_id,
+        ).order_by(AuditLog.created_at).all()

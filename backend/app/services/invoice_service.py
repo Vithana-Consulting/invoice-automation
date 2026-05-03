@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.core.exceptions import ParsingError
-from app.db.repository import AuditLogRepository, InvoiceRepository
+from app.db.repository import AuditLogRepository, ExtractionLogRepository, InvoiceRepository
 from app.parsers import get_parser
 from app.services.pipeline import preflight_check, validate_parsed_invoice
 
@@ -69,8 +69,14 @@ class InvoiceService:
         parser = get_parser()
         logger.info("Parsing invoice %d (%s) with %s", invoice_id, record.file_name, settings.PARSER_MODE)
 
+        raw_parsed_data: dict = {}
         try:
             invoice = parser.parse(record.file_path, record.file_type or "pdf")
+            # Capture raw parsed data for ExtractionLog (best-effort)
+            try:
+                raw_parsed_data = invoice.model_dump()
+            except Exception:
+                pass
         except (ParsingError, Exception) as e:
             self.invoice_repo.update_parsing_failed(invoice_id, str(e))
             self.audit_repo.log(
@@ -111,6 +117,19 @@ class InvoiceService:
         # ─── Success (possibly with warnings) ──────────────────────
         has_warnings = bool(validation.warnings)
         self.invoice_repo.update_parsed(invoice_id, invoice, settings.PARSER_MODE)
+
+        # Store immutable extraction log (S.36 CGST Act — 72-month retention)
+        try:
+            ext_repo = ExtractionLogRepository(self.db)
+            ext_repo.create(
+                invoice_id=invoice_id,
+                raw_llm_json=json.dumps(raw_parsed_data),
+                parser_mode=getattr(invoice, "parser_mode", None) or settings.PARSER_MODE,
+            )
+            self.db.commit()
+        except Exception as exc:
+            logger.warning("Failed to store extraction log for invoice %d: %s", invoice_id, exc)
+
         if has_warnings:
             self.invoice_repo._update(
                 invoice_id,

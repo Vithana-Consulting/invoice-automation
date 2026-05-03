@@ -70,6 +70,7 @@ Return ONLY valid JSON with these fields (use null for missing fields):
     "account_holder": "Account holder name or null",
     "upi_id": "UPI ID if present or null"
   },
+  "place_of_supply": "2-digit GST state code of place of supply (e.g. '29' for Karnataka) or null",
   "line_items": [
     {
       "description": "item name",
@@ -271,6 +272,7 @@ class LLMParser(InvoiceParser):
             pan_number=data.get("pan_number"),
             buyer_pan_number=data.get("buyer_pan_number"),
             currency=data.get("currency", "INR"),
+            place_of_supply=data.get("place_of_supply"),
             parser_mode=f"llm:{provider_name}/{model}",
             confidence_scores={"llm": 0.95, "vendor_name": 0.95, "total_amount": 0.95},
         )
