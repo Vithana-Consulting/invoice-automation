@@ -12,7 +12,7 @@ from app.auth.dependencies import get_current_user, get_optional_user
 from app.db.repository import DraftRepository, RuleRepository
 from app.db.session import get_db
 from app.models.db_models import User
-from app.services.draft_service import DraftService
+from app.services.draft_service import DraftService  # noqa: F401 — also used in reparse_draft
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -21,6 +21,16 @@ router = APIRouter()
 VALID_STATUSES = {"PENDING_REVIEW", "PENDING_VENDOR", "APPROVED", "PUSHED", "PUSH_FAILED", "REJECTED"}
 VALID_PLATFORMS = {"zoho", "tally", "quickbooks"}
 VALID_SOURCES = {"gmail", "stripe", "chargebee", "manual_upload"}
+
+VALID_OVERRIDE_REASON_CODES = {
+    "AMOUNT_VERIFIED_MANUALLY",
+    "DUPLICATE_CONFIRMED_DIFFERENT",
+    "GSTIN_CONFIRMED_VALID",
+    "RCM_CONFIRMED_NOT_APPLICABLE",
+    "ITC_CUTOFF_CONFIRMED_WITHIN_LIMIT",
+    "GST_ROUTING_CONFIGURED_SEPARATELY",
+    "OTHER",
+}
 
 
 @router.get("")
@@ -87,6 +97,39 @@ def update_draft(draft_id: int, body: dict, db: Session = Depends(get_db)):
     if not draft:
         raise HTTPException(status_code=404, detail="Draft not found")
     return {"status": "success", "data": _draft_to_dict(draft)}
+
+
+@router.post("/{draft_id}/reparse")
+def reparse_draft(draft_id: int, db: Session = Depends(get_db)):
+    """Re-run LLM extraction on the source invoice and refresh the draft with new data.
+
+    Useful when extraction produced wrong line items or amounts.
+    Clears validation_errors so the next push re-runs the validation pipeline fresh.
+    Draft status is preserved (stays APPROVED / PUSH_FAILED so user can push immediately after).
+    """
+    from app.services.invoice_service import InvoiceService
+
+    repo = DraftRepository(db)
+    draft = repo.get_by_id(draft_id)
+    if not draft:
+        raise HTTPException(status_code=404, detail="Draft not found")
+
+    # Re-parse the source invoice
+    invoice_service = InvoiceService(db)
+    parsed = invoice_service.parse_invoice(draft.invoice_id)
+    if not parsed:
+        raise HTTPException(
+            status_code=400,
+            detail="Reparse failed — check that the invoice file is accessible and the LLM is configured.",
+        )
+
+    # Sync fresh data back into the draft
+    service = DraftService(db)
+    updated = service.refresh_draft_from_invoice(draft_id)
+    if not updated:
+        raise HTTPException(status_code=400, detail="Invoice reparsed but draft refresh failed.")
+
+    return {"status": "success", "data": _draft_to_dict(updated)}
 
 
 @router.post("/{draft_id}/approve")
@@ -162,10 +205,23 @@ def push_draft(
     pipeline = build_pre_push_pipeline()
     results = pipeline.run(draft, draft.invoice, db)
     blocking = pipeline.blocking(results)
+    non_overridable = pipeline.non_overridable_blocks(results)
 
-    # Persist validation results on the draft
+    # Persist validation results on the draft (include detail + non_overridable for UI)
+    # Use float() for Decimal values so json.dumps doesn't choke
+    def _serialize_detail(d: dict) -> dict:
+        from decimal import Decimal as _Decimal
+        return {k: float(v) if isinstance(v, _Decimal) else v for k, v in (d or {}).items()}
+
     all_results_json = _json.dumps([
-        {"code": r.code, "passed": r.passed, "severity": r.severity, "message": r.message}
+        {
+            "code": r.code,
+            "passed": r.passed,
+            "severity": r.severity,
+            "message": r.message,
+            "detail": _serialize_detail(r.detail),
+            "non_overridable": r.non_overridable,
+        }
         for r in results
     ])
     repo.update(draft_id, validation_errors=all_results_json)
@@ -174,12 +230,35 @@ def push_draft(
         override_code = (body or {}).get("override_reason_code", "")
         override_reason = (body or {}).get("override_reason", "")
 
+        # Validate override_reason_code is a known, allowlisted value
+        if override_code and override_code not in VALID_OVERRIDE_REASON_CODES:
+            raise HTTPException(status_code=400, detail="Invalid override_reason_code")
+
+        # Non-overridable blocks (e.g. CompositionVendorValidator) — cannot be bypassed
+        if non_overridable:
+            raise HTTPException(status_code=422, detail={
+                "error": "NON_OVERRIDABLE_BLOCK",
+                "blocks": [{"code": r.code, "message": r.message, "detail": r.detail} for r in non_overridable],
+                "hint": "These compliance blocks cannot be overridden. Resolve the underlying issue first.",
+            })
+
         if not override_code:
             raise HTTPException(status_code=422, detail={
                 "error": "VALIDATION_BLOCKED",
                 "blocks": [{"code": r.code, "message": r.message, "detail": r.detail} for r in blocking],
-                "hint": "To override, resubmit with override_reason_code and override_reason in the request body.",
+                "hint": "To override, resubmit with override_reason_code and override_reason. "
+                        "Requires admin or owner role.",
             })
+
+        # Only admin or owner can override compliance blocks
+        if not _user_can_override(user, db):
+            raise HTTPException(status_code=403, detail={
+                "error": "OVERRIDE_NOT_PERMITTED",
+                "hint": "Only users with admin or owner role can override compliance validation blocks.",
+            })
+
+        # Resolve actor identity for the immutable audit trail
+        actor_role = _get_user_role(user, db) if user else None
 
         # Log the override — immutable compliance record
         audit_repo = ComplianceAuditLogRepository(db)
@@ -188,6 +267,9 @@ def push_draft(
             entity_id=draft_id,
             action="push_override",
             actor_id=user.id if user else None,
+            actor_email=user.email if user else None,
+            actor_name=user.name if user else None,
+            actor_role=actor_role,
             override_reason_code=override_code,
             override_reason=override_reason,
             metadata={"blocked_by": [r.code for r in blocking]},
@@ -280,8 +362,18 @@ def bulk_push_drafts(body: dict, db: Session = Depends(get_db)):
             # ── Pre-push validation (bulk: skip blocking drafts, log warnings) ──
             val_results = pipeline.run(draft, draft.invoice, db)
             blocking = pipeline.blocking(val_results)
+            from decimal import Decimal as _Decimal
+            def _sd(d):
+                return {k: float(v) if isinstance(v, _Decimal) else v for k, v in (d or {}).items()}
             all_results_json = _json.dumps([
-                {"code": r.code, "passed": r.passed, "severity": r.severity, "message": r.message}
+                {
+                    "code": r.code,
+                    "passed": r.passed,
+                    "severity": r.severity,
+                    "message": r.message,
+                    "detail": _sd(r.detail),
+                    "non_overridable": r.non_overridable,
+                }
                 for r in val_results
             ])
             repo.update(draft_id, validation_errors=all_results_json)
@@ -415,6 +507,48 @@ def apply_rules_to_drafts(body: dict = None, db: Session = Depends(get_db)):
     }
 
 
+def _user_can_override(user, db: Session) -> bool:
+    """Returns True if the user has admin or owner role in the current tenant."""
+    if not user:
+        return False
+    from app.models.db_models import CompanyMember
+    from app.tenant.context import TenantContext
+    company_id = TenantContext.get()
+    if not company_id:
+        return False
+    membership = (
+        db.query(CompanyMember)
+        .filter(
+            CompanyMember.user_id == user.id,
+            CompanyMember.company_id == company_id,
+            CompanyMember.is_active == True,
+        )
+        .first()
+    )
+    return membership is not None and membership.role in ("owner", "admin")
+
+
+def _get_user_role(user, db: Session) -> str:
+    """Returns the user's role in the current tenant, or 'unknown'."""
+    if not user:
+        return "unknown"
+    from app.models.db_models import CompanyMember
+    from app.tenant.context import TenantContext
+    company_id = TenantContext.get()
+    if not company_id:
+        return "unknown"
+    membership = (
+        db.query(CompanyMember)
+        .filter(
+            CompanyMember.user_id == user.id,
+            CompanyMember.company_id == company_id,
+            CompanyMember.is_active == True,
+        )
+        .first()
+    )
+    return membership.role if membership else "unknown"
+
+
 def _push_draft_to_platform(draft, db: Session) -> dict:
     """Push a draft to its designated billing platform using DB-stored credentials.
 
@@ -449,10 +583,14 @@ def _draft_to_dict(draft) -> dict:
         "pushed_at": str(draft.pushed_at) if draft.pushed_at else None,
         "external_bill_id": draft.external_bill_id,
         "validation_warnings": json.loads(draft.validation_warnings) if draft.validation_warnings else [],
+        "validation_errors": json.loads(draft.validation_errors) if draft.validation_errors else [],
         "tax_breakup": json.loads(draft.tax_breakup_json) if draft.tax_breakup_json else None,
         "invoice_type": draft.invoice_type,
         "account_id": draft.account_id,
         "account_name": draft.account.name if draft.account else None,
+        "itc_status": draft.itc_status,
+        "tds_applicable": draft.tds_applicable,
+        "place_of_supply": draft.place_of_supply,
         "created_at": str(draft.created_at) if draft.created_at else None,
         "updated_at": str(draft.updated_at) if draft.updated_at else None,
     }

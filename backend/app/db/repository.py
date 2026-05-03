@@ -346,12 +346,15 @@ class DraftRepository(TenantBaseRepository):
         return query.count()
 
     def count_by_status(self) -> dict:
-        """Count drafts per status for the current tenant."""
-        all_drafts = self._base_query().all()
-        counts = {}
-        for d in all_drafts:
-            counts[d.status] = counts.get(d.status, 0) + 1
-        return counts
+        """Count drafts per status for the current tenant using a SQL GROUP BY."""
+        from sqlalchemy import func
+        rows = (
+            self.db.query(InvoiceDraft.status, func.count(InvoiceDraft.id))
+            .filter(InvoiceDraft.company_id == self._company_id)
+            .group_by(InvoiceDraft.status)
+            .all()
+        )
+        return {status: count for status, count in rows}
 
 
 class IntegrationRepository(TenantBaseRepository):
@@ -574,13 +577,18 @@ class ComplianceAuditLogRepository(TenantBaseRepository):
     model = AuditLog
 
     def log(self, entity_type: str, entity_id: int, action: str,
-            actor_id: int = None, override_reason_code: str = None,
+            actor_id: int = None, actor_email: str = None,
+            actor_name: str = None, actor_role: str = None,
+            override_reason_code: str = None,
             override_reason: str = None, metadata: dict = None) -> AuditLog:
         record = AuditLog(
             entity_type=entity_type,
             entity_id=entity_id,
             action=action,
             actor_id=actor_id,
+            actor_email=actor_email,
+            actor_name=actor_name,
+            actor_role=actor_role,
             override_reason_code=override_reason_code,
             override_reason=override_reason,
             metadata_json=json.dumps(metadata) if metadata else None,

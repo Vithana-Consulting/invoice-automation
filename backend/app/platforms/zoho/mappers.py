@@ -93,14 +93,9 @@ def invoice_to_zoho_bill(
     if d:
         payload["due_date"] = d
 
-    # Place of Supply: use invoice.place_of_supply, fallback to vendor state from GSTIN
-    from app.utils.gstin_utils import extract_state_code
-    pos = getattr(invoice, "place_of_supply", None)
-    if not pos:
-        vendor_gstin = getattr(invoice, "gst_number", "") or ""
-        pos = extract_state_code(vendor_gstin) or None
-    if pos:
-        payload["place_of_supply"] = pos
+    # Note: place_of_supply is NOT sent to Zoho for bills — it is a sales invoice
+    # field only. Zoho derives supply type (IGST vs CGST+SGST) from vendor GST state
+    # vs org state, which is handled via tax_id / igst_tax_id selection above.
 
     payload["notes"] = f"Auto-imported from invoice {invoice.invoice_number or invoice.file_name}"
     return payload

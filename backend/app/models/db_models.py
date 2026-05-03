@@ -415,6 +415,11 @@ class AuditLog(Base):
     entity_id            = Column(Integer, nullable=False, index=True)
     action               = Column(String(100), nullable=False)  # "push_override", "reconciliation_override"
     actor_id             = Column(Integer, ForeignKey("users.id"), nullable=True)
+    # Denormalized point-in-time identity — do NOT resolve via FK join at read time
+    # (user email/role can change after the fact; these are stamped at write time)
+    actor_email          = Column(String(255), nullable=True)
+    actor_name           = Column(String(255), nullable=True)
+    actor_role           = Column(String(50), nullable=True)
     override_reason_code = Column(String(100), nullable=True)
     override_reason      = Column(Text, nullable=True)
     metadata_json        = Column(Text, nullable=True)

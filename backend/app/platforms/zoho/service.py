@@ -70,6 +70,30 @@ class ZohoBilling(BillingPlatform):
                 },
             }
 
+    def _find_existing_bill(self, invoice_number: str, vendor_id: str) -> Optional[str]:
+        """Search Zoho for a bill with the given invoice_number (bill_number).
+
+        Returns the Zoho bill_id string if found, None otherwise.
+        This is used for pre-push idempotency — if a bill already exists we return
+        its ID immediately rather than creating a duplicate.
+        """
+        if not invoice_number:
+            return None
+        try:
+            bill = self.client.find_bill_by_number(invoice_number)
+            if bill:
+                bill_id = bill.get("bill_id")
+                if bill_id:
+                    logger.info(
+                        "Pre-push idempotency check: bill '%s' already exists in Zoho (bill_id=%s)",
+                        invoice_number, bill_id,
+                    )
+                    return bill_id
+        except Exception as e:
+            # Log and continue — a search failure should not block the push attempt
+            logger.warning("Pre-push existence check failed for bill '%s': %s", invoice_number, e)
+        return None
+
     def push_bill(self, draft: Any, db: Session) -> Dict[str, Any]:
         # GST handling: tax_id is set on each line item; Zoho automatically computes
         # CGST/SGST/IGST based on its configured tax rates (Option A — Zoho-managed taxes).
@@ -97,6 +121,14 @@ class ZohoBilling(BillingPlatform):
                 f"Vendor '{vendor_name}' not found on Zoho and no vendor mapping exists. "
                 "Create a vendor mapping in Vendor Mappings before pushing."
             )
+
+        # Pre-push idempotency check — return immediately if bill already exists in Zoho.
+        # Prevents duplicate bills when the DB update fails after a successful Zoho create
+        # and the user retries the push.
+        invoice_number = (draft.invoice_number or "").strip()
+        existing_bill_id = self._find_existing_bill(invoice_number, vendor_id)
+        if existing_bill_id:
+            return {"external_id": existing_bill_id, "platform": "zoho"}
 
         # Resolve COA → Zoho account IDs
         from app.platforms.account_resolver import resolve_accounts_for_platform
@@ -155,6 +187,7 @@ class ZohoBilling(BillingPlatform):
         except ZohoError as e:
             msg = str(e).lower()
             if "igst has to be applied" in msg and igst_tax_id:
+                # Zoho says this is inter-state but we sent intra-state → retry with IGST
                 logger.info("Retrying with IGST tax_id=%s (inter-state)", igst_tax_id)
                 try:
                     result = _try_push(igst_tax_id)
@@ -166,6 +199,14 @@ class ZohoBilling(BillingPlatform):
                             logger.info("Bill already in Zoho: %s", existing.get("bill_id"))
                             return {"external_id": existing["bill_id"], "platform": "zoho"}
                     raise
+            elif "igst cannot be applied" in msg or "intrastate" in msg:
+                # Zoho says this is intra-state but we sent IGST → retry with CGST+SGST
+                logger.info(
+                    "Retrying with CGST+SGST tax_id=%s (intra-state — org_state_code mismatch, "
+                    "check your Zoho integration settings)",
+                    tax_id,
+                )
+                result = _try_push(tax_id)
             elif "already been created" in msg:
                 bill_number = invoice.invoice_number or f"BILL-{invoice.id}"
                 existing = self.client.find_bill_by_number(bill_number)

@@ -141,6 +141,52 @@ class DraftService:
 
         return draft
 
+    def refresh_draft_from_invoice(self, draft_id: int) -> Optional[InvoiceDraft]:
+        """Re-sync a draft's extracted fields from its invoice record after a reparse.
+
+        Updates: vendor_name, invoice_number, invoice_date, due_date, total_amount,
+                 tax_amount, line_items_json, tax_breakup_json, validation_warnings.
+        Preserves: status, push_to, resolved_vendor_name, account_id, push_error.
+        Resets: validation_errors (cleared so next push re-runs pipeline fresh).
+        """
+        draft = self.draft_repo.get_by_id(draft_id)
+        if not draft:
+            return None
+
+        invoice = self.invoice_repo.get_by_id(draft.invoice_id)
+        if not invoice or invoice.parsing_status not in ("PARSED", "WARNING"):
+            return None
+
+        validation_warnings = invoice.validation_errors if invoice.parsing_status == "WARNING" else None
+        invoice_type = self._determine_invoice_type(invoice)
+        account_id = self._assign_account(invoice, invoice_type)
+
+        updated = self.draft_repo.update(
+            draft_id,
+            vendor_name=invoice.vendor_name or draft.vendor_name,
+            invoice_number=invoice.invoice_number,
+            invoice_date=invoice.invoice_date,
+            due_date=invoice.due_date,
+            total_amount=invoice.total_amount,
+            tax_amount=invoice.tax_amount,
+            line_items_json=invoice.line_items_json,
+            tax_breakup_json=invoice.tax_breakup_json,
+            invoice_type=invoice_type,
+            account_id=account_id,
+            validation_warnings=validation_warnings,
+            validation_errors=None,   # cleared — next push re-runs pipeline
+            push_error=None,
+        )
+
+        self.audit_repo.log(
+            entity_type="draft",
+            entity_id=draft_id,
+            action="draft_refreshed_from_reparse",
+            details={"invoice_id": invoice.id, "new_total": float(invoice.total_amount or 0)},
+        )
+
+        return updated
+
     def create_drafts_for_parsed_invoices(self, source: str = "gmail") -> List[InvoiceDraft]:
         """Create drafts for all parsed invoices (including WARNING) that don't have drafts yet."""
         parsed = self.invoice_repo.list_all(parsing_status="PARSED")

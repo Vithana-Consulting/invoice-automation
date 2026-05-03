@@ -6,6 +6,15 @@ export interface User {
   is_admin: boolean;
 }
 
+export interface ValidationBlock {
+  code: string;
+  passed: boolean;
+  severity: string;
+  message: string;
+  detail?: Record<string, unknown>;
+  non_overridable?: boolean;
+}
+
 export interface InvoiceDraft {
   id: number;
   invoice_id: number;
@@ -27,6 +36,15 @@ export interface InvoiceDraft {
   push_error: string | null;
   pushed_at: string | null;
   external_bill_id: string | null;
+  invoice_type: string | null;
+  account_id: number | null;
+  account_name: string | null;
+  tax_breakup: { cgst_amount: number; sgst_amount: number; igst_amount: number } | null;
+  validation_warnings: Array<{ message: string }>;
+  validation_errors: ValidationBlock[];
+  itc_status: string | null;
+  tds_applicable: boolean | null;
+  place_of_supply: string | null;
   created_at: string;
   updated_at: string;
 }
