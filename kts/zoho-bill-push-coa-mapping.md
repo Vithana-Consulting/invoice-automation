@@ -103,15 +103,44 @@ Zoho India (GST) requires every bill line item to declare its tax. Two IDs live 
 |---|---|---|---|
 | `tax_id` | GST18 | 18% (auto-splits CGST 9% + SGST 9%) | Intra-state vendor |
 | `igst_tax_id` | IGST18 | 18% (single IGST) | Inter-state vendor |
+| `org_state_code` | e.g. `29` | Your company's GST state code | Determines inter vs intra-state |
 
-Zoho knows the vendor's registered state and the org's state. The system tries intra-state GST first. If Zoho rejects with `"IGST has to be applied"`, the push is automatically retried with the IGST tax ID.
+### How inter-state detection works
 
-### Where to get these IDs
+The system compares the **first 2 digits of the vendor's GSTIN** against the `org_state_code`:
+
+```
+vendor GSTIN: 27AAHCK7999J1ZK  →  state = 27 (Maharashtra)
+org_state_code: 29              →  org   = 29 (Karnataka)
+27 ≠ 29  →  inter-state  →  use IGST
+```
+
+```
+vendor GSTIN: 29XXXX...         →  state = 29 (Karnataka)
+org_state_code: 29              →  org   = 29 (Karnataka)
+29 = 29  →  intra-state  →  use CGST + SGST
+```
+
+If `org_state_code` is not set, the system defaults to intra-state and retries with IGST if Zoho rejects.
+
+### Common state codes
+
+| Code | State |
+|---|---|
+| 29 | Karnataka |
+| 33 | Tamil Nadu |
+| 27 | Maharashtra |
+| 07 | Delhi |
+| 36 | Telangana |
+| 32 | Kerala |
+
+### Where to get the tax IDs
 
 1. Log in to Zoho Books
 2. Go to **Settings → Taxes**
 3. Copy the tax ID for `GST18` (intra-state) and `IGST18` (inter-state)
-4. Paste them in **Integrations → Zoho Books → GST Tax ID fields**
+4. Paste them in **Integrations → Zoho Books**
+5. Set `org_state_code` to your company's 2-digit GST state code
 
 ---
 
@@ -138,6 +167,7 @@ Integrations → Zoho Books
   ✓ Refresh token obtained (via OAuth Authorise button)
   ✓ GST Tax ID (intra-state)   ← Zoho → Settings → Taxes → GST18
   ✓ IGST Tax ID (inter-state)  ← Zoho → Settings → Taxes → IGST18
+  ✓ Organisation State Code    ← 2-digit GST state code of your company (e.g. 29 for Karnataka)
 
 Chart of Accounts
   ✓ Accounts synced from Zoho

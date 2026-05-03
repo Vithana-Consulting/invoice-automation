@@ -117,8 +117,29 @@ class ZohoBilling(BillingPlatform):
 
         tax_id = self.config.get("tax_id") or ""
         igst_tax_id = self.config.get("igst_tax_id") or ""
+        org_state_code = (self.config.get("org_state_code") or "").strip()
 
-        # Build payload with default (intra-state) tax first; retry with IGST if Zoho disagrees.
+        # Determine inter-state vs intra-state using org state code + vendor GST state.
+        # Vendor state = first 2 digits of their GSTIN (e.g. "33" = Tamil Nadu).
+        # If org_state_code is configured and vendor GST is known, pick tax_id upfront.
+        # Falls back to retry logic if org_state_code is not set.
+        vendor_gst = (getattr(invoice, "gst_number", None) or "").strip()
+        vendor_state = vendor_gst[:2] if len(vendor_gst) >= 2 else ""
+
+        if org_state_code and vendor_state:
+            is_interstate = vendor_state != org_state_code
+            chosen_tax_id = igst_tax_id if is_interstate else tax_id
+            logger.info(
+                "GST route: org_state=%s vendor_state=%s → %s → using tax_id=%s",
+                org_state_code, vendor_state,
+                "IGST (inter-state)" if is_interstate else "CGST+SGST (intra-state)",
+                chosen_tax_id,
+            )
+        else:
+            # org_state_code not configured — default to intra-state, retry if Zoho disagrees
+            chosen_tax_id = tax_id
+            logger.info("org_state_code not set — defaulting to intra-state GST, will retry if needed")
+
         def _try_push(use_tax_id: str) -> dict:
             payload = invoice_to_zoho_bill(
                 invoice, vendor_id,
@@ -130,11 +151,10 @@ class ZohoBilling(BillingPlatform):
 
         from app.core.exceptions import ZohoError
         try:
-            result = _try_push(tax_id)
+            result = _try_push(chosen_tax_id)
         except ZohoError as e:
             msg = str(e).lower()
             if "igst has to be applied" in msg and igst_tax_id:
-                # Inter-state transaction — retry with IGST tax
                 logger.info("Retrying with IGST tax_id=%s (inter-state)", igst_tax_id)
                 try:
                     result = _try_push(igst_tax_id)
@@ -147,7 +167,6 @@ class ZohoBilling(BillingPlatform):
                             return {"external_id": existing["bill_id"], "platform": "zoho"}
                     raise
             elif "already been created" in msg:
-                # Duplicate bill — find and return the existing bill ID
                 bill_number = invoice.invoice_number or f"BILL-{invoice.id}"
                 existing = self.client.find_bill_by_number(bill_number)
                 if existing:
@@ -243,5 +262,10 @@ class ZohoBilling(BillingPlatform):
             {"key": "igst_tax_id", "label": "IGST Tax ID — Inter-state", "type": "text",
              "required": False,
              "help": "Zoho tax rate ID for inter-state purchases (IGST). "
-                     "Auto-selected when the invoice has IGST amounts."},
+                     "Auto-selected when vendor state differs from org state."},
+            {"key": "org_state_code", "label": "Organisation State Code", "type": "text",
+             "required": False,
+             "help": "2-digit GST state code of your organisation (e.g. 29 = Karnataka, 33 = Tamil Nadu). "
+                     "Used to auto-detect inter-state vs intra-state for every vendor bill. "
+                     "If set, IGST is used when the vendor's state differs from this; CGST+SGST otherwise."},
         ]
