@@ -34,8 +34,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 FLUSH_TABLES = [
+    "invoice_payments",      # must come before invoice_drafts (FK)
     "invoice_drafts",
     "invoices",
+    "company_bank_accounts",
     "processed_emails",
     "vendor_cache",
     "audit_log",
