@@ -425,3 +425,23 @@ class AuditLog(Base):
     metadata_json        = Column(Text, nullable=True)
     created_at           = Column(DateTime, nullable=False, default=datetime.utcnow)
     # NOTE: no updated_at, no soft delete — immutable audit record
+
+
+class SecretRotationLog(Base):
+    """Immutable audit log of secret rotation events.
+
+    Insert-only. Never updated or deleted.
+    """
+    __tablename__ = "secret_rotation_log"
+
+    id                   = Column(Integer, primary_key=True, autoincrement=True)
+    secret_key           = Column(String(100), nullable=False, index=True)
+    rotated_at           = Column(DateTime, nullable=False, default=datetime.utcnow)
+    rotated_by           = Column(String(255), nullable=True)
+    rotation_method      = Column(String(50), nullable=False, default="auto")
+    previous_key_hash    = Column(String(64), nullable=True)   # SHA-256 of OLD value
+    new_key_hash         = Column(String(64), nullable=True)   # SHA-256 of NEW value
+    grace_period_seconds = Column(Integer, nullable=True)
+    grace_expires_at     = Column(DateTime, nullable=True)
+    notes                = Column(Text, nullable=True)
+    # NOTE: no updated_at — insert-only audit record

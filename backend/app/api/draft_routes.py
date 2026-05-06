@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.auth.dependencies import get_current_user, get_optional_user
-from app.db.repository import DraftRepository, RuleRepository
+from app.db.repository import AuditLogRepository, DraftRepository, InvoiceRepository, RuleRepository
 from app.db.session import get_db
 from app.models.db_models import User
 from app.services.draft_service import DraftService  # noqa: F401 — also used in reparse_draft
@@ -276,23 +276,71 @@ def push_draft(
         )
         db.commit()
 
+    # FIX 3: capture the vendor name as it was on the draft before push (for mutation detection)
+    pre_push_vendor_name = draft.resolved_vendor_name
+
     try:
         logger.info("Pushing draft %d to %s (vendor: %s)", draft_id, draft.push_to, vendor_mapping.canonical_name)
         result = _push_draft_to_platform(draft, db)
+        external_bill_id = result.get("external_id", "")
+        push_to = draft.push_to
+        invoice_id = draft.invoice_id
+
         repo.update(
             draft_id,
             status="PUSHED",
-            external_bill_id=result.get("external_id", ""),
+            external_bill_id=external_bill_id,
             push_error=None,
             pushed_at=datetime.utcnow(),
         )
+
+        # FIX 1: sync push status back to parent invoices table
+        InvoiceRepository(db)._update(
+            invoice_id,
+            zoho_push_status="PUSHED",
+            zoho_bill_id=external_bill_id,
+        )
+
+        # FIX 2: write push success audit log entry
+        AuditLogRepository(db).log(
+            entity_type="draft",
+            entity_id=draft_id,
+            action="pushed",
+            details={"external_bill_id": external_bill_id, "platform": push_to, "invoice_id": invoice_id},
+            status="success",
+        )
+
+        # FIX 3: log vendor name mutation if it changed during push
+        if pre_push_vendor_name and vendor_mapping.canonical_name and pre_push_vendor_name != vendor_mapping.canonical_name:
+            AuditLogRepository(db).log(
+                entity_type="draft",
+                entity_id=draft_id,
+                action="vendor_name_changed",
+                details={"old_resolved_vendor_name": pre_push_vendor_name, "new_resolved_vendor_name": vendor_mapping.canonical_name},
+                status="info",
+            )
+
+        db.commit()
+
         return {
             "status": "success",
-            "data": {"draft_id": draft_id, "external_bill_id": result.get("external_id"), "platform": draft.push_to},
+            "data": {"draft_id": draft_id, "external_bill_id": external_bill_id, "platform": push_to},
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Push failed for draft %d: %s", draft_id, e)
         repo.update(draft_id, status="PUSH_FAILED", push_error=str(e))
+        # FIX 2: write push failure audit log entry
+        AuditLogRepository(db).log(
+            entity_type="draft",
+            entity_id=draft_id,
+            action="pushed",
+            details={"platform": draft.push_to, "invoice_id": draft.invoice_id, "error": str(e)},
+            status="failure",
+            error=str(e),
+        )
+        db.commit()
         raise HTTPException(status_code=500, detail="Push failed. Check the draft's error field for details.")
 
 

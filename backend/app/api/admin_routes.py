@@ -20,6 +20,7 @@ from app.config import (
     _save_overrides,
     settings,
 )
+from app.core.secret_rotation import RotationError, rotation_manager, ROTATABLE_KEYS
 from app.db.session import get_db
 from app.models.db_models import (
     AuditLog, ChartOfAccount, Company, CompanyMember, Integration,
@@ -253,7 +254,7 @@ def set_company_oauth(company_id: int, body: CompanyOAuthRequest, db: Session = 
     redirect_uri = body.redirect_uri
     if not redirect_uri:
         from app.db.system_config import sysconfig
-        redirect_uri = sysconfig.get("GOOGLE_REDIRECT_URI", "")
+        redirect_uri = sysconfig.get_optional("GOOGLE_REDIRECT_URI") or ""
 
     config = {
         "client_id": body.client_id,
@@ -377,28 +378,25 @@ def update_config(body: dict = Body(...)):
 
 
 @router.delete("/config/{key}", dependencies=[Depends(_verify_admin_key)])
-def reset_config(key: str):
+def reset_config(key: str, db: Session = Depends(get_db)):
     """Remove a runtime override, reverting to .env value."""
+    from app.models.db_models import SystemConfig
     upper_key = key.upper()
-    overrides = _load_overrides()
-
-    if upper_key not in overrides:
-        return {"status": "success", "message": f"{upper_key} has no override"}
-
-    del overrides[upper_key]
-    _save_overrides(overrides)
-    logger.info("Admin config reset: %s (reverted to .env)", upper_key)
-
-    return {"status": "success", "message": f"{upper_key} reverted to .env value"}
+    deleted = db.query(SystemConfig).filter(SystemConfig.key == upper_key).delete()
+    db.commit()
+    if deleted:
+        logger.info("Admin config reset: %s (reverted to .env)", upper_key)
+        return {"status": "success", "message": f"{upper_key} reverted to .env value"}
+    return {"status": "success", "message": f"{upper_key} has no override"}
 
 
 @router.delete("/config", dependencies=[Depends(_verify_admin_key)])
-def reset_all_config():
+def reset_all_config(db: Session = Depends(get_db)):
     """Remove all runtime overrides, reverting everything to .env values."""
-    overrides = _load_overrides()
-    count = len(overrides)
-    _save_overrides({})
-    logger.info("Admin config: all %d overrides cleared", count)
+    from app.models.db_models import SystemConfig
+    count = db.query(SystemConfig).filter(SystemConfig.key.in_(EDITABLE_KEYS)).delete(synchronize_session=False)
+    db.commit()
+    logger.info("Admin config: all %d overrides cleared from DB", count)
     return {"status": "success", "message": f"Cleared {count} overrides"}
 
 
@@ -474,3 +472,50 @@ def flush_all(db: Session = Depends(get_db)):
         "message": f"Flushed {total_rows} rows and {results['attachments_deleted']} attachment files",
         "data": results,
     }
+
+
+# ── Secret Rotation ──────────────────────────────────────────────────────────
+
+
+class SecretRotateRequest(BaseModel):
+    key: str                                     # must be in ROTATABLE_KEYS
+    grace_period_seconds: Optional[int] = None   # only relevant for JWT_SECRET_KEY
+    rotated_by: Optional[str] = "admin"
+
+
+@router.post("/secrets/rotate", dependencies=[Depends(_verify_admin_key)])
+def rotate_secret(
+    body: SecretRotateRequest,
+    db: Session = Depends(get_db),
+):
+    """Rotate a secret key. For JWT_SECRET_KEY, a 1-hour grace period is applied.
+
+    Returns rotation metadata only — no secret values are ever returned.
+    """
+    try:
+        result = rotation_manager.rotate(
+            db=db,
+            key=body.key,
+            rotated_by=body.rotated_by,
+            grace_period_seconds=body.grace_period_seconds,
+        )
+    except RotationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    logger.info(
+        "Secret rotated: key=%s rotated_by=%s grace_expires_at=%s",
+        body.key,
+        body.rotated_by,
+        result.get("grace_expires_at"),
+    )
+    return {"status": "success", "data": result}
+
+
+@router.get("/secrets/history", dependencies=[Depends(_verify_admin_key)])
+def secret_rotation_history(
+    key: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    """Get rotation history for audit (no secret values returned)."""
+    history = rotation_manager.get_rotation_history(db, key=key)
+    return {"status": "success", "data": history}

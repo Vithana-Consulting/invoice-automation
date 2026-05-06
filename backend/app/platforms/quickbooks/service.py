@@ -30,6 +30,11 @@ class QuickBooksBilling(BillingPlatform):
             realm_id=config.get("realm_id", ""),
             base_url=config.get("base_url", "https://quickbooks.api.intuit.com"),
         )
+        # Home currency of the QBO company account (set once during company setup in QBO).
+        # For Indian companies this is INR. Bills in the home currency need no CurrencyRef.
+        # Bills in any other currency are "foreign currency" and require multicurrency to be
+        # enabled in QBO Company Settings and also require an ExchangeRate in the payload.
+        self.home_currency = (config.get("home_currency") or "INR").upper()
 
     def test_connection(self) -> Dict[str, Any]:
         try:
@@ -111,10 +116,28 @@ class QuickBooksBilling(BillingPlatform):
             "DocNumber": draft.invoice_number or f"BILL-{draft.id}",
         }
 
-        # Set currency from invoice
-        currency = draft.currency or "INR"
-        if currency != "USD":
+        # Currency handling per QBO API spec:
+        # - Home currency bills: omit CurrencyRef (QBO defaults to home currency).
+        # - Foreign currency bills: CurrencyRef + ExchangeRate are both required by QBO.
+        #   QBO also requires multicurrency to be enabled in Company Settings > Advanced.
+        currency = (draft.currency or self.home_currency).upper()
+        if currency != self.home_currency:
             payload["CurrencyRef"] = {"value": currency}
+            # ExchangeRate is required by QBO for foreign currency bills.
+            # Source: invoice exchange_rate field if set, else config default, else hard error.
+            exchange_rate = (
+                getattr(draft, "exchange_rate", None)
+                or self.config.get("default_exchange_rate")
+            )
+            if not exchange_rate:
+                raise Exception(
+                    f"Bill currency is {currency} but QBO home currency is {self.home_currency}. "
+                    "QuickBooks requires an ExchangeRate for foreign currency bills. "
+                    "Set 'default_exchange_rate' in the QuickBooks integration config "
+                    f"(e.g. 1 {currency} = X {self.home_currency}), or enable multicurrency "
+                    "in QBO Company Settings > Advanced and supply an exchange rate."
+                )
+            payload["ExchangeRate"] = float(exchange_rate)
 
         if draft.invoice_date:
             payload["TxnDate"] = draft.invoice_date
@@ -187,4 +210,32 @@ class QuickBooksBilling(BillingPlatform):
             {"key": "realm_id", "label": "Realm ID (Company ID)", "type": "text", "required": True},
             {"key": "base_url", "label": "API Base URL", "type": "text", "required": True,
              "default": "https://sandbox-quickbooks.api.intuit.com"},
+            {
+                "key": "home_currency",
+                "label": "Home Currency",
+                "type": "text",
+                "required": False,
+                "default": "INR",
+                "description": (
+                    "ISO 4217 code of your QBO company's home currency (e.g. INR, USD). "
+                    "Must match what was set when the QBO company was created — it cannot be "
+                    "changed after the fact. Bills in this currency are posted as-is. "
+                    "Bills in any other currency require multicurrency to be enabled in "
+                    "QBO Company Settings > Advanced, and also require default_exchange_rate."
+                ),
+            },
+            {
+                "key": "default_exchange_rate",
+                "label": "Default Exchange Rate (foreign currency → home currency)",
+                "type": "text",
+                "required": False,
+                "default": "",
+                "description": (
+                    "Used only for foreign-currency bills (e.g. USD bills when home currency is INR). "
+                    "Enter the rate as: 1 foreign unit = X home currency units "
+                    "(e.g. enter 84.5 if 1 USD = 84.50 INR). "
+                    "Requires multicurrency to be enabled in QBO first. "
+                    "Leave blank if all your bills are in the home currency."
+                ),
+            },
         ]

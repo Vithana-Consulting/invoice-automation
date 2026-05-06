@@ -1,15 +1,12 @@
 from __future__ import annotations
 
-import json
 import logging
-import os
+from datetime import datetime
 from typing import Any
 
 from pydantic_settings import BaseSettings
 
 logger = logging.getLogger(__name__)
-
-RUNTIME_OVERRIDES_FILE = os.path.join("data", "runtime_config.json")
 
 # Keys that are editable via admin dashboard at runtime
 EDITABLE_KEYS = {
@@ -33,21 +30,39 @@ READONLY_KEYS = {
 
 
 def _load_overrides() -> dict:
-    """Load runtime overrides from JSON file."""
-    if os.path.exists(RUNTIME_OVERRIDES_FILE):
-        try:
-            with open(RUNTIME_OVERRIDES_FILE) as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError):
-            return {}
-    return {}
+    """Load runtime overrides from system_config DB table."""
+    try:
+        from app.db.session import db_session
+        from app.models.db_models import SystemConfig
+        with db_session() as db:
+            records = db.query(SystemConfig).filter(
+                SystemConfig.key.in_(EDITABLE_KEYS)
+            ).all()
+            return {r.key: r.value for r in records if r.value is not None}
+    except Exception as exc:
+        logger.warning("Failed to load runtime overrides from DB: %s", exc)
+        return {}
 
 
-def _save_overrides(overrides: dict):
-    """Save runtime overrides to JSON file."""
-    os.makedirs(os.path.dirname(RUNTIME_OVERRIDES_FILE), exist_ok=True)
-    with open(RUNTIME_OVERRIDES_FILE, "w") as f:
-        json.dump(overrides, f, indent=2)
+def _save_overrides(overrides: dict) -> None:
+    """Save runtime overrides to system_config DB table."""
+    from app.db.session import db_session
+    from app.models.db_models import SystemConfig
+    with db_session() as db:
+        for key, value in overrides.items():
+            if key not in EDITABLE_KEYS:
+                continue
+            record = db.query(SystemConfig).filter(SystemConfig.key == key).first()
+            if record:
+                record.value = str(value)
+                record.updated_at = datetime.utcnow()
+            else:
+                db.add(SystemConfig(
+                    key=key,
+                    value=str(value),
+                    is_secret=key in SECRET_KEYS,
+                ))
+        # db_session() auto-commits on clean exit, rolls back on exception
 
 
 class Settings(BaseSettings):
@@ -109,8 +124,9 @@ class Settings(BaseSettings):
 
     def __getattribute__(self, name: str) -> Any:
         """Override attribute access to check runtime overrides first."""
-        # Only intercept known settings fields, not internal pydantic stuff
-        if name.isupper() and not name.startswith("_"):
+        # Only consult DB overrides for EDITABLE_KEYS — never for DATABASE_URL
+        # or other bootstrap keys needed to build the DB connection itself.
+        if name in EDITABLE_KEYS:
             overrides = _load_overrides()
             if name in overrides:
                 return overrides[name]

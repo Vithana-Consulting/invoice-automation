@@ -33,44 +33,33 @@ class ConfigNotSetError(Exception):
     """Raised when a required system config key is not set in DB."""
     pass
 
-# Keys that are managed via SystemConfig
+
+# All admin-editable runtime settings managed via SystemConfig table
 SYSTEM_KEYS = {
-    # Google OAuth (web login)
-    "GOOGLE_CLIENT_ID",
-    "GOOGLE_CLIENT_SECRET",
-    "GOOGLE_REDIRECT_URI",
-    # Can be extended with more keys as needed
+    "PARSER_MODE", "LLM_PROVIDER", "LLM_MODEL", "LLM_API_KEY", "LLM_BASE_URL",
+    "LLAMAPARSE_API_KEY",
+    "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REDIRECT_URI",
+    "FRONTEND_URL", "DEBUG", "MAX_RETRIES",
 }
 
 # Keys that should be masked in API responses
-SECRET_SYSTEM_KEYS = {
-    "GOOGLE_CLIENT_SECRET",
-}
+SECRET_SYSTEM_KEYS = {"LLM_API_KEY", "LLAMAPARSE_API_KEY", "GOOGLE_CLIENT_SECRET"}
 
 
 class SystemConfigManager:
     """Read/write system config from DB with .env fallback.
 
-    Thread-safe: creates a new DB session per operation.
+    Thread-safe: creates a new DB session per operation via db_session().
     """
 
-    def _get_session(self):
-        from app.db.session import SessionLocal
-        return SessionLocal()
-
     def get(self, key: str) -> str:
-        """Get a config value from DB. Raises if not configured."""
-        db = self._get_session()
-        try:
-            from app.models.db_models import SystemConfig
+        """Get a config value from DB. Raises ConfigNotSetError if not configured."""
+        from app.db.session import db_session
+        from app.models.db_models import SystemConfig
+        with db_session() as db:
             record = db.query(SystemConfig).filter(SystemConfig.key == key).first()
-            if record and record.value:
+            if record and record.value is not None:
                 return record.value
-        except Exception:
-            pass
-        finally:
-            db.close()
-
         raise ConfigNotSetError(
             f"{key} is not configured. Set it via Admin Dashboard → System Config."
         )
@@ -83,16 +72,12 @@ class SystemConfigManager:
             return None
 
     def get_many(self, keys: List[str]) -> Dict[str, str]:
-        """Get multiple config values from DB. Raises if any key is missing."""
-        db = self._get_session()
-        try:
-            from app.models.db_models import SystemConfig
+        """Get multiple config values from DB. Raises ConfigNotSetError if any key is missing."""
+        from app.db.session import db_session
+        from app.models.db_models import SystemConfig
+        with db_session() as db:
             records = db.query(SystemConfig).filter(SystemConfig.key.in_(keys)).all()
             db_values = {r.key: r.value for r in records if r.value}
-        except Exception:
-            db_values = {}
-        finally:
-            db.close()
 
         missing = [k for k in keys if k not in db_values]
         if missing:
@@ -104,9 +89,9 @@ class SystemConfigManager:
 
     def set(self, key: str, value: str, is_secret: bool = None) -> None:
         """Set a config value in DB."""
-        db = self._get_session()
-        try:
-            from app.models.db_models import SystemConfig
+        from app.db.session import db_session
+        from app.models.db_models import SystemConfig
+        with db_session() as db:
             record = db.query(SystemConfig).filter(SystemConfig.key == key).first()
             if record:
                 record.value = value
@@ -114,16 +99,12 @@ class SystemConfigManager:
                 if is_secret is not None:
                     record.is_secret = is_secret
             else:
-                record = SystemConfig(
+                db.add(SystemConfig(
                     key=key,
                     value=value,
                     is_secret=is_secret if is_secret is not None else key in SECRET_SYSTEM_KEYS,
-                )
-                db.add(record)
-            db.commit()
-            logger.info("SystemConfig updated: %s", key)
-        finally:
-            db.close()
+                ))
+        logger.info("SystemConfig updated: %s", key)
 
     def set_many(self, items: Dict[str, str]) -> None:
         """Set multiple config values at once."""
@@ -132,28 +113,25 @@ class SystemConfigManager:
 
     def delete(self, key: str) -> None:
         """Delete a config value (reverts to .env/default)."""
-        db = self._get_session()
-        try:
-            from app.models.db_models import SystemConfig
+        from app.db.session import db_session
+        from app.models.db_models import SystemConfig
+        with db_session() as db:
             record = db.query(SystemConfig).filter(SystemConfig.key == key).first()
             if record:
                 db.delete(record)
-                db.commit()
                 logger.info("SystemConfig deleted: %s (reverted to .env)", key)
-        finally:
-            db.close()
 
     def list_all(self) -> List[Dict[str, Any]]:
         """List all system config keys with their DB values."""
-        db = self._get_session()
+        from app.db.session import db_session
+        from app.models.db_models import SystemConfig
         try:
-            from app.models.db_models import SystemConfig
-            records = db.query(SystemConfig).all()
-            db_values = {r.key: r for r in records}
-        except Exception:
+            with db_session() as db:
+                records = db.query(SystemConfig).all()
+                db_values = {r.key: r for r in records}
+        except Exception as exc:
+            logger.warning("Failed to load system config list from DB: %s", exc)
             db_values = {}
-        finally:
-            db.close()
 
         result = []
         for key in sorted(SYSTEM_KEYS):

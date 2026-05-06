@@ -16,7 +16,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from app.config import settings
-from app.db.session import SessionLocal
+from app.db.session import db_session
 from app.models.db_models import CompanyMember, User
 from app.tenant.context import TenantContext
 
@@ -58,8 +58,7 @@ class TenantMiddleware(BaseHTTPMiddleware):
                 return await call_next(request)
 
             # Look up company membership
-            db = SessionLocal()
-            try:
+            with db_session() as db:
                 # Check for X-Company-Id header
                 company_id_header = request.headers.get("x-company-id")
 
@@ -89,8 +88,6 @@ class TenantMiddleware(BaseHTTPMiddleware):
 
                 if membership:
                     TenantContext.set(membership.company_id)
-            finally:
-                db.close()
 
         except (jwt.InvalidTokenError, ValueError):
             pass  # Invalid token — let the auth dependency handle the 401

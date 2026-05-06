@@ -42,7 +42,7 @@ Return ONLY valid JSON with these fields (use null for missing fields):
   "vendor_name": "The company/business that ISSUED this invoice (the seller, not the buyer)",
   "vendor_address": "Full address of the vendor/seller (street, city, state, pincode) or null",
   "buyer_name": "The company/person the invoice is billed TO (the buyer/customer)",
-  "invoice_number": "The invoice/bill number",
+  "invoice_number": "The invoice/bill number — copy EXACTLY as printed, digit by digit",
   "invoice_date": "Date in YYYY-MM-DD format",
   "due_date": "Due date in YYYY-MM-DD format or null",
   "total_amount": 0.00,
@@ -71,6 +71,12 @@ Return ONLY valid JSON with these fields (use null for missing fields):
     "upi_id": "UPI ID if present or null"
   },
   "place_of_supply": "2-digit GST state code of place of supply (e.g. '29' for Karnataka) or null",
+  "confidence_scores": {
+    "invoice_number": 0.95,
+    "vendor_name": 0.95,
+    "total_amount": 0.95,
+    "gst_number": 0.95
+  },
   "line_items": [
     {
       "description": "item name",
@@ -87,13 +93,16 @@ Return ONLY valid JSON with these fields (use null for missing fields):
 }
 
 IMPORTANT:
+- invoice_number: copy the invoice/bill number CHARACTER BY CHARACTER exactly as it appears on the document. Do NOT paraphrase, reconstruct, or guess any digit. If the number is long (10+ digits), re-read it carefully before writing. Transposing or dropping a single digit makes ITC reconciliation fail under GST law. After extracting, verify by mentally re-reading the number from the document one more time.
 - vendor_name is the SELLER/ISSUER, not the buyer/customer
-- buyer_gst_number is the GSTIN printed as "Billed To" / "Ship To" / "Customer GSTIN"
+- buyer_gst_number is the GSTIN printed in the "Bill To" / "Billed To" / "Ship To" / "Recipient" / "Customer GSTIN" section of the invoice. Look carefully in the buyer/recipient address block — it is often labelled "GSTIN", "GST No", or "GST Registration No". Extract it even if it appears alongside the buyer address. Do NOT leave this null if a GSTIN is visible in the Bill To section.
 - For amounts, use numeric values without currency symbols or commas
 - Extract CGST, SGST, IGST amounts separately in tax_breakup (look for tax summary table)
 - Extract bank/payment details if present on the invoice (often at the bottom)
 - If this is not an invoice (e.g., receipt, ticket, form), still extract what you can
 - hsn_or_sac: look for columns labelled "HSN", "SAC", "HSN/SAC", "HSN Code", "SAC Code" on every line item row. For Indian service invoices, SAC codes are 6-digit numbers (e.g. 998211, 998314). Extract even if the column header is abbreviated. If no code is printed on a line item, return null for that item.
+- tax_rate: for EACH line item, extract the GST/tax rate percentage from the "Tax Rate", "GST Rate", "Rate %", or "IGST/CGST/SGST %" column. Express as a plain number (e.g. 18 for 18% GST, 9 for 9% CGST). If the line item shows separate CGST+SGST rates, sum them for tax_rate (e.g. CGST 9% + SGST 9% = tax_rate 18). Do NOT leave tax_rate null if a tax rate column or percentage is printed for that line item.
+- confidence_scores: for each key field, rate your confidence 0.0–1.0. Use 1.0 only if the value is unambiguous and clearly printed. Use 0.7–0.9 if the field required inference. Use below 0.7 if the field is partially obscured, ambiguous, or required guessing. invoice_number confidence should be 1.0 only if every digit was clearly legible.
 - Return ONLY the JSON object, no other text"""
 
 
@@ -274,5 +283,5 @@ class LLMParser(InvoiceParser):
             currency=data.get("currency", "INR"),
             place_of_supply=data.get("place_of_supply"),
             parser_mode=f"llm:{provider_name}/{model}",
-            confidence_scores={"llm": 0.95, "vendor_name": 0.95, "total_amount": 0.95},
+            confidence_scores=data.get("confidence_scores") or {"llm": 0.9},
         )
