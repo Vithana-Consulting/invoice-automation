@@ -33,6 +33,12 @@ INVOICE_NUM_PATTERNS = [
     # Explicit label: require at least one digit in the captured token
     re.compile(r"(?:Invoice|Inv|Bill)\s*(?:No|Number|#|Num)[.:\s#\-]*([A-Z0-9][\w\-/]*\d[\w\-/]*)", re.IGNORECASE),
     re.compile(r"(?:Invoice|Inv)\s*[:.#\-]\s*([A-Z0-9][\w\-/]*\d[\w\-/]*)", re.IGNORECASE),
+    # "Inv. No. : MOS/25/0087" — dot-separated label with spaces
+    re.compile(r"Inv\.?\s*No\.?\s*[:\s]+([A-Z0-9][\w\-/]*\d[\w\-/]*)", re.IGNORECASE),
+    # Standalone "No: PPW-1092"
+    re.compile(r"(?<!\w)No\s*[:]\s*([A-Z]{2,8}-\d{1,6})\b", re.IGNORECASE),
+    # Indian 3-part without year-range: MOS/25/0087
+    re.compile(r"\b([A-Z]{2,6}/\d{2,4}/\d{1,6})\b", re.IGNORECASE),
     # Indian-style tax invoice numbers: CA/25-26/340, INV/2024-25/696, CA/25\x0026/340 (OCR null bytes)
     re.compile(r"\b([A-Z]{2,4}[/\-]\d{2,4}[\-\x00]\d{2,4}[/\-]\d{1,6})\b", re.IGNORECASE),
 ]
@@ -78,9 +84,11 @@ DUE_DATE_PATTERNS = [
 
 # Invoice date
 INVOICE_DATE_PATTERNS = [
-    re.compile(r"(?:Invoice\s*Date|Date\s*of\s*Invoice|Bill\s*Date|Dated|Date)\s*[:\s]*(\d{1,2}[/\-]\d{1,2}[/\-]\d{4})", re.IGNORECASE),
-    re.compile(r"(?:Invoice\s*Date|Date\s*of\s*Invoice|Bill\s*Date|Dated|Date)\s*[:\s]*(\d{4}[/\-]\d{1,2}[/\-]\d{1,2})", re.IGNORECASE),
-    re.compile(r"(?:Invoice\s*Date|Bill\s*Date|Dated|Date)\s*[:\s]*(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s+\d{4})", re.IGNORECASE),
+    re.compile(r"(?:Invoice\s*Date|Date\s*of\s*Invoice|Bill\s*Date|Dated|Dt\.?|Date)\s*[:\s]*(\d{1,2}[/\-]\d{1,2}[/\-]\d{4})", re.IGNORECASE),
+    re.compile(r"(?:Invoice\s*Date|Date\s*of\s*Invoice|Bill\s*Date|Dated|Dt\.?|Date)\s*[:\s]*(\d{4}[/\-]\d{1,2}[/\-]\d{1,2})", re.IGNORECASE),
+    re.compile(r"(?:Invoice\s*Date|Bill\s*Date|Dated|Dt\.?|Date)\s*[:\s]*(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s+\d{4})", re.IGNORECASE),
+    # "Dt. : 12-Jan-2025" — dash-separated month-name date
+    re.compile(r"(?:Invoice\s*Date|Bill\s*Date|Dated|Dt\.?|Date)\s*[:\s]*(\d{1,2}[.\-](?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*[.\-]\d{4})", re.IGNORECASE),
 ]
 
 

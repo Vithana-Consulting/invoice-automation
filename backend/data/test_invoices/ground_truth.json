@@ -1,0 +1,74 @@
+{
+  "invoice_A1.pdf": {
+    "vendor_name": "NEXGEN SOFTWARE SOLUTIONS PRIVATE LIMITED",
+    "vendor_gstin": "33AABCN4521A1Z7",
+    "buyer_gstin": "29AAHCE1996R1ZL",
+    "invoice_number": "INV/2024-25/047",
+    "invoice_date": "15/03/2025",
+    "total_amount": 11800.0,
+    "gst_type": "CGST+SGST"
+  },
+  "invoice_B1.pdf": {
+    "vendor_name": "KONNECT FINTECH SERVICES LLP",
+    "vendor_gstin": "06AABCK8823B1ZQ",
+    "buyer_gstin": "29AAHCE1996R1ZL",
+    "invoice_number": "KFS-2025-0312",
+    "invoice_date": "01 Mar 2025",
+    "total_amount": 17110.0,
+    "gst_type": "IGST"
+  },
+  "invoice_C1.pdf": {
+    "vendor_name": "BHARATH CLOUD TECHNOLOGIES PVT. LTD.",
+    "vendor_gstin": "33AABFB3312C1Z4",
+    "buyer_gstin": "29AAHCE1996R1ZL",
+    "invoice_number": "BCT/2025/0089",
+    "invoice_date": "2025-01-20",
+    "total_amount": 8496.0,
+    "gst_type": "CGST+SGST"
+  },
+  "invoice_D1.pdf": {
+    "vendor_name": "APEX LEGAL & MANAGEMENT CONSULTANTS LLP",
+    "vendor_gstin": "27AABCA7781K1ZJ",
+    "buyer_gstin": "29AAHCE1996R1ZL",
+    "invoice_number": "CA/24-25/118",
+    "invoice_date": "28 Feb 2025",
+    "total_amount": 222430.0,
+    "gst_type": "IGST"
+  },
+  "invoice_E1.pdf": {
+    "vendor_name": "PRAKASH PRINTING WORKS",
+    "vendor_gstin": "29AABPP5577G1Z3",
+    "buyer_gstin": "29AAHCE1996R1ZL",
+    "invoice_number": "PPW-1092",
+    "invoice_date": "05-02-2025",
+    "total_amount": 590.0,
+    "gst_type": "IGST"
+  },
+  "invoice_F1.pdf": {
+    "vendor_name": "STACKPAY TECHNOLOGIES PVT. LTD.",
+    "vendor_gstin": "29AABCS9922M1ZK",
+    "buyer_gstin": "29AAHCE1996R1ZL",
+    "invoice_number": "SPT/MAR25/00891",
+    "invoice_date": "31/03/2025",
+    "total_amount": 11446.0,
+    "gst_type": "IGST"
+  },
+  "invoice_G1.pdf": {
+    "vendor_name": "BHARAT HEAVY ELECTRICALS LIMITED (BHEL)",
+    "vendor_gstin": "19AAACB0472F1ZC",
+    "buyer_gstin": "29AAHCE1996R1ZL",
+    "invoice_number": "BHEL/PSE/2025/0341",
+    "invoice_date": "10/02/2025",
+    "total_amount": 134660.0,
+    "gst_type": "IGST"
+  },
+  "invoice_H1.pdf": {
+    "vendor_name": "METRO OFFICE SUPPLIES Pvt. Ltd.",
+    "vendor_gstin": "07AABCM5512H1Z8",
+    "buyer_gstin": "29AAHCE1996R1ZL",
+    "invoice_number": "MOS/25/0087",
+    "invoice_date": "12-Jan-2025",
+    "total_amount": 6317.0,
+    "gst_type": "IGST"
+  }
+}

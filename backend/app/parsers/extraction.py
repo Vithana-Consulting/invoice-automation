@@ -50,8 +50,11 @@ VENDOR_EXTRACT_PATTERNS = [
 GST_PATTERN = re.compile(r"\b(\d{2}[A-Z]{5}\d{4}[A-Z]\d[Z][A-Z\d])\b")
 
 # Amount patterns — ordered by specificity
+# Layer 1: true invoice totals (before any deductions like TDS/advance)
 AMOUNT_PATTERNS_SPECIFIC = [
-    re.compile(r"(?:Grand\s*Total|Amount\s*Due|Net\s*Payable|Amount\s*Payable|Balance\s*Due)\s*[:\s]*(?:Rs\.?|INR|₹|\$|USD|€|£)?\s*([\d,]+\.?\d*)", re.IGNORECASE),
+    re.compile(r"(?:Grand\s*Total|Gross\s*Total|Invoice\s*Total)\s*[:\s]*(?:Rs\.?|INR|₹|\$|USD|€|£)?\s*([\d,]+\.?\d*)", re.IGNORECASE),
+    # Layer 2: net payable amounts (may be after TDS/advance deductions — lower priority)
+    re.compile(r"(?:Amount\s*Due|Net\s*Payable|Amount\s*Payable|Balance\s*Due)\s*[:\s]*(?:Rs\.?|INR|₹|\$|USD|€|£)?\s*([\d,]+\.?\d*)", re.IGNORECASE),
 ]
 AMOUNT_PATTERNS_GENERAL = [
     re.compile(r"(?:Total\s*Amount|Net\s*Amount)\s*[:\s]*(?:Rs\.?|INR|₹|\$|USD|€|£)?\s*([\d,]+\.?\d*)", re.IGNORECASE),
@@ -86,6 +89,9 @@ def _is_bad_vendor_line(line: str) -> bool:
     digits = sum(c.isdigit() for c in line)
     if len(line) > 0 and digits / len(line) > 0.5:
         return True
+    # Address lines like "No. 8, Gandhi Bazaar" or "Shop No. 14, ..."
+    if re.match(r"^(?:No|House|Shop|Flat|Plot|Ward|Door)\s*\.?\s*\d", line.strip(), re.IGNORECASE):
+        return True
     return False
 
 
@@ -97,6 +103,12 @@ def _clean_vendor(name: str) -> str:
     name = re.sub(r"\*+", "", name).strip()
     # Strip leading/trailing pipes (markdown tables)
     name = name.strip("|").strip()
+    # Normalize OCR-merged endings: "PRIVATE LIMITTAEDX" → "PRIVATE LIMITED"
+    # (pdfplumber merges two-column text without spaces, e.g. "LIMITED" + "TAX" → "LIMITTAEDX")
+    # Negative lookahead excludes valid endings "ED" (Limited) and "ITED" (Limited)
+    name = re.sub(r"\bLIMIT(?!ED\b|ITED\b)[A-Z]{1,8}\b", "LIMITED", name, flags=re.IGNORECASE).strip()
+    # Strip trailing document-type labels that got pulled in (e.g. "... Invoice")
+    name = re.sub(r"\s+\b(?:Tax\s+)?Invoice\b.*$", "", name, flags=re.IGNORECASE).strip()
     return name
 
 
@@ -118,7 +130,11 @@ def _first_company_in_line(line: str) -> Optional[str]:
         m = COMPANY_SUFFIXES.search(line)
     if not m:
         return None
-    candidate = line[:m.end()].strip()
+    end_pos = m.end()
+    # Include a trailing period after "Ltd" / "Inc" endings (e.g. "PVT. LTD.")
+    if end_pos < len(line) and line[end_pos] == ".":
+        end_pos += 1
+    candidate = line[:end_pos].strip()
     # Strip any leading label like "FROM " or "GSTIN - "
     candidate = re.sub(r"^(?:FROM|TO|GSTIN\s*[-:\s]*\S+)\s*", "", candidate, flags=re.IGNORECASE).strip()
     return candidate if candidate else None
@@ -171,9 +187,9 @@ def extract_vendor_name(text: str) -> Optional[str]:
             break  # Only check the first non-blank line after FROM/TO header
 
     # ── Strategy 1: Bill To boundary ─────────────────────────────────────────
-    # Zoho/Freshbooks invoices have seller block at top, then "Bill To" section.
-    # Everything AFTER "Bill To" is buyer — restrict search to the header block.
-    bill_to_m = re.search(r"\bBill(?:ed)?\s+To\b", clean_text, re.IGNORECASE)
+    # Invoices have seller block at top, then buyer section.
+    # Everything AFTER "Bill To" / "Billed To" / "Buyer :" is buyer — restrict to header.
+    bill_to_m = re.search(r"\bBill(?:ed)?\s+To\b|\bBuyer\s*:", clean_text, re.IGNORECASE)
     search_text = clean_text[:bill_to_m.start()] if bill_to_m else clean_text
 
     if bill_to_m:
@@ -202,13 +218,19 @@ def extract_vendor_name(text: str) -> Optional[str]:
     for line in lines:
         if not COMPANY_SUFFIXES.search(line):
             continue
-        if _is_bad_vendor_line(line) or _is_buyer_line(line):
-            continue
-        # If a single line contains multiple company names (two-column OCR merge),
-        # extract only the first one.
+        # Extract company-name boundary FIRST, then check the clean candidate.
+        # Checking the raw line would reject "METRO OFFICE SUPPLIES Pvt. Ltd. TAX INVOICE"
+        # because "tax invoice" appears in it — but the extracted name is clean.
         candidate = _first_company_in_line(line)
         if not candidate:
-            candidate = line
+            # Try stripping trailing doc-type keywords before giving up
+            stripped = re.sub(
+                r"\s*(?:TAX\s+INVOICE|INVOICE|CREDIT\s+NOTE|DEBIT\s+NOTE|RECEIPT|PROFORMA)\s*$",
+                "", line, flags=re.IGNORECASE,
+            ).strip()
+            candidate = stripped if COMPANY_SUFFIXES.search(stripped) else line
+        if _is_bad_vendor_line(candidate) or _is_buyer_line(candidate):
+            continue
         cleaned = _clean_vendor(candidate)
         if ":" in cleaned:
             parts = cleaned.split(":", 1)
@@ -284,6 +306,12 @@ def extract_invoice_number(text: str) -> Optional[str]:
         re.compile(r"(?:Bill\s*No\.?|Bill\s*Number)\s*[:\s#\-]*([A-Z0-9][\w\-/]{2,30})", re.IGNORECASE),
         re.compile(r"(?:Receipt\s*Number)\s*[:\s#\-]*([A-Z0-9][\w\-/]{2,30})", re.IGNORECASE),
         re.compile(r"(?:Invoice|Inv)\s*[:.#\-]\s*([A-Z0-9][\w\-/]{2,30})", re.IGNORECASE),
+        # "Inv. No. : MOS/25/0087" — dot-separated label with spaces
+        re.compile(r"Inv\.?\s*No\.?\s*[:\s]+([A-Z0-9][\w\-/]*\d[\w\-/]*)", re.IGNORECASE),
+        # Standalone "No: PPW-1092" — short 2-part alpha-numeric (not preceded by a word)
+        re.compile(r"(?<!\w)No\s*[:]\s*([A-Z]{2,8}-\d{1,6})\b", re.IGNORECASE),
+        # Indian 3-part without year-range: MOS/25/0087
+        re.compile(r"\b([A-Z]{2,6}/\d{2,4}/\d{1,6})\b", re.IGNORECASE),
         # Indian tax invoice format: CA/25-26/340, INV/2024-25/696
         # Also handles OCR null-byte artefacts where '-' becomes '\x00'
         re.compile(r"\b([A-Z]{2,6}[/\-]\d{2,4}[\-\x00]\d{2,4}[/\-]\d{1,6})\b", re.IGNORECASE),
