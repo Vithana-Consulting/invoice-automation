@@ -106,13 +106,33 @@ def reparse_draft(draft_id: int, db: Session = Depends(get_db)):
     Useful when extraction produced wrong line items or amounts.
     Clears validation_errors so the next push re-runs the validation pipeline fresh.
     Draft status is preserved (stays APPROVED / PUSH_FAILED so user can push immediately after).
+    If the local file is missing and the invoice came from Gmail, re-downloads it first.
     """
+    import os
     from app.services.invoice_service import InvoiceService
 
     repo = DraftRepository(db)
     draft = repo.get_by_id(draft_id)
     if not draft:
         raise HTTPException(status_code=404, detail="Draft not found")
+
+    # If the PDF is missing from disk, try to recover it from Gmail before reparsing
+    invoice = InvoiceRepository(db).get_by_id(draft.invoice_id)
+    if invoice and invoice.file_path and not os.path.exists(invoice.file_path):
+        if invoice.source == "gmail":
+            from app.services.email_service import redownload_invoice_from_gmail
+            recovered = redownload_invoice_from_gmail(invoice, db)
+            if not recovered:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Invoice file not on disk and Gmail re-download failed. Check that the Gmail integration is connected and the original email is not deleted.",
+                )
+            logger.info("Reparse: recovered PDF from Gmail for invoice %d", invoice.id)
+        else:
+            raise HTTPException(
+                status_code=422,
+                detail="Invoice file not found on disk. Re-upload the original PDF to reparse.",
+            )
 
     # Re-parse the source invoice
     invoice_service = InvoiceService(db)
@@ -280,68 +300,220 @@ def push_draft(
     pre_push_vendor_name = draft.resolved_vendor_name
 
     try:
-        logger.info("Pushing draft %d to %s (vendor: %s)", draft_id, draft.push_to, vendor_mapping.canonical_name)
+        logger.info("[PIPELINE] Stage 1/4 — Push draft %d to %s", draft_id, draft.push_to)
         result = _push_draft_to_platform(draft, db)
         external_bill_id = result.get("external_id", "")
         push_to = draft.push_to
         invoice_id = draft.invoice_id
-
-        repo.update(
-            draft_id,
-            status="PUSHED",
-            external_bill_id=external_bill_id,
-            push_error=None,
-            pushed_at=datetime.utcnow(),
-        )
-
-        # FIX 1: sync push status back to parent invoices table
-        InvoiceRepository(db)._update(
-            invoice_id,
-            zoho_push_status="PUSHED",
-            zoho_bill_id=external_bill_id,
-        )
-
-        # FIX 2: write push success audit log entry
-        AuditLogRepository(db).log(
-            entity_type="draft",
-            entity_id=draft_id,
-            action="pushed",
-            details={"external_bill_id": external_bill_id, "platform": push_to, "invoice_id": invoice_id},
-            status="success",
-        )
-
-        # FIX 3: log vendor name mutation if it changed during push
-        if pre_push_vendor_name and vendor_mapping.canonical_name and pre_push_vendor_name != vendor_mapping.canonical_name:
-            AuditLogRepository(db).log(
-                entity_type="draft",
-                entity_id=draft_id,
-                action="vendor_name_changed",
-                details={"old_resolved_vendor_name": pre_push_vendor_name, "new_resolved_vendor_name": vendor_mapping.canonical_name},
-                status="info",
-            )
-
-        db.commit()
-
-        return {
-            "status": "success",
-            "data": {"draft_id": draft_id, "external_bill_id": external_bill_id, "platform": push_to},
-        }
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("Push failed for draft %d: %s", draft_id, e)
+        logger.error("[PIPELINE] Stage 1 FAILED for draft %d: %s", draft_id, e)
         repo.update(draft_id, status="PUSH_FAILED", push_error=str(e))
-        # FIX 2: write push failure audit log entry
         AuditLogRepository(db).log(
-            entity_type="draft",
-            entity_id=draft_id,
-            action="pushed",
+            entity_type="draft", entity_id=draft_id, action="pushed",
             details={"platform": draft.push_to, "invoice_id": draft.invoice_id, "error": str(e)},
-            status="failure",
-            error=str(e),
+            status="failure", error=str(e),
         )
         db.commit()
         raise HTTPException(status_code=500, detail="Push failed. Check the draft's error field for details.")
+
+    # Stage 2: commit push result to DB
+    logger.info("[PIPELINE] Stage 2/4 — Commit push result (bill_id=%s)", external_bill_id)
+    repo.update(draft_id, status="PUSHED", external_bill_id=external_bill_id,
+                push_error=None, pushed_at=datetime.utcnow())
+    InvoiceRepository(db)._update(invoice_id, zoho_push_status="PUSHED", zoho_bill_id=external_bill_id)
+    AuditLogRepository(db).log(
+        entity_type="draft", entity_id=draft_id, action="pushed",
+        details={"external_bill_id": external_bill_id, "platform": push_to, "invoice_id": invoice_id},
+        status="success",
+    )
+    if pre_push_vendor_name and vendor_mapping.canonical_name and pre_push_vendor_name != vendor_mapping.canonical_name:
+        AuditLogRepository(db).log(
+            entity_type="draft", entity_id=draft_id, action="vendor_name_changed",
+            details={"old_resolved_vendor_name": pre_push_vendor_name, "new_resolved_vendor_name": vendor_mapping.canonical_name},
+            status="info",
+        )
+    db.commit()
+
+    # Stages 3 + 4: attach PDF then clean up local file
+    pipeline = _run_post_push_pipeline(draft, external_bill_id, push_to, db)
+
+    return {
+        "status": "success",
+        "data": {
+            "draft_id": draft_id,
+            "external_bill_id": external_bill_id,
+            "platform": push_to,
+            "pipeline": pipeline,
+        },
+    }
+
+
+def _run_post_push_pipeline(draft, bill_id: str, platform: str, db) -> dict:
+    """Stage 3 + 4: attach PDF to the bill, then delete the local file.
+
+    Sequential — cleanup only runs after attachment confirms.
+    Returns a status dict so the API response includes pipeline results.
+    """
+    import os
+    from app.db.repository import InvoiceRepository
+
+    result = {"attach": "skipped", "cleanup": "skipped", "file": None}
+
+    if platform != "zoho" or not bill_id:
+        return result
+
+    # Resolve absolute file path (stored path may be relative to backend root)
+    invoice = InvoiceRepository(db).get_by_id(draft.invoice_id)
+    if not invoice or not invoice.file_path:
+        result["attach"] = "skipped — no file_path on invoice record"
+        return result
+
+    file_path = invoice.file_path
+    if not os.path.isabs(file_path):
+        from app.config import settings
+        # Resolve relative to the project root (parent of data/)
+        file_path = os.path.abspath(file_path)
+
+    result["file"] = file_path
+
+    if not os.path.exists(file_path):
+        logger.info("[PIPELINE] Stage 3/4 — PDF not on disk, attempting Gmail re-download: %s", file_path)
+        from app.services.email_service import redownload_invoice_from_gmail
+        recovered = redownload_invoice_from_gmail(invoice, db)
+        if recovered:
+            file_path = recovered
+            result["file"] = file_path
+        else:
+            result["attach"] = "skipped — file not on disk and Gmail re-download unavailable"
+            logger.warning("[PIPELINE] Stage 3/4 — Could not recover PDF, skipping attachment")
+            return result
+
+    # Stage 3: attach
+    logger.info("[PIPELINE] Stage 3/4 — Attach %s to Zoho bill %s", invoice.file_name, bill_id)
+    try:
+        from app.platforms.base import get_billing_platform
+        zoho = get_billing_platform(db, "zoho")
+        zoho.client.attach_document(bill_id, file_path)
+        result["attach"] = "ok"
+        logger.info("[PIPELINE] Stage 3/4 — Attached successfully")
+        DraftRepository(db).update(draft.id, pdf_attached_at=datetime.utcnow())
+        db.commit()
+    except Exception as exc:
+        result["attach"] = f"failed — {exc}"
+        logger.warning("[PIPELINE] Stage 3/4 — Attachment failed, keeping local file: %s", exc)
+        return result  # do NOT clean up if attachment failed
+
+    # Stage 4: cleanup — only reached when attachment succeeded
+    logger.info("[PIPELINE] Stage 4/4 — Cleanup local file: %s", file_path)
+    try:
+        os.remove(file_path)
+        # Remove parent directory if now empty
+        parent = os.path.dirname(file_path)
+        if parent and os.path.isdir(parent) and not os.listdir(parent):
+            os.rmdir(parent)
+        result["cleanup"] = "ok"
+        logger.info("[PIPELINE] Stage 4/4 — Local file deleted")
+    except Exception as exc:
+        result["cleanup"] = f"failed — {exc}"
+        logger.warning("[PIPELINE] Stage 4/4 — Cleanup failed: %s", exc)
+
+    return result
+
+
+@router.post("/{draft_id}/reattach")
+async def reattach_invoice_to_bill(
+    draft_id: int,
+    db: Session = Depends(get_db),
+    file: "UploadFile | None" = None,
+):
+    """Attach an invoice PDF to an already-pushed Zoho bill.
+
+    For Gmail-sourced invoices: re-downloads the original attachment directly
+    from Gmail — no file upload needed.
+
+    For manual-upload invoices: upload the PDF as multipart/form-data.
+    """
+    import os, tempfile
+    from fastapi import UploadFile
+
+    repo = DraftRepository(db)
+    draft = repo.get_by_id(draft_id)
+    if not draft:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    if draft.status != "PUSHED":
+        raise HTTPException(status_code=400, detail="Draft must be in PUSHED state to reattach")
+    if draft.push_to != "zoho":
+        raise HTTPException(status_code=400, detail="Reattach is only supported for Zoho bills")
+    if not draft.external_bill_id:
+        raise HTTPException(status_code=400, detail="No Zoho bill_id on this draft")
+
+    invoice = InvoiceRepository(db).get_by_id(draft.invoice_id)
+    if not invoice:
+        raise HTTPException(status_code=404, detail="Invoice record not found")
+
+    tmp_path = None
+    file_used = None
+
+    try:
+        from app.platforms.base import get_billing_platform
+
+        if invoice.source == "gmail":
+            # Re-download from Gmail — no file upload required
+            from app.services.email_service import redownload_invoice_from_gmail
+            local_path = invoice.file_path if os.path.exists(invoice.file_path or "") else None
+            if not local_path:
+                local_path = redownload_invoice_from_gmail(invoice, db)
+            if not local_path:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Could not re-download from Gmail. Check that the Gmail integration is connected and the original email is not deleted.",
+                )
+            file_used = invoice.file_name
+            attach_path = local_path
+        else:
+            # Manual upload source — file must be provided
+            if file is None:
+                raise HTTPException(status_code=400, detail="This invoice was manually uploaded. Provide the PDF as a file upload.")
+            content = await file.read()
+            suffix = os.path.splitext(file.filename or "invoice.pdf")[1] or ".pdf"
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(content)
+                tmp_path = tmp.name
+            file_used = file.filename
+            attach_path = tmp_path
+
+        zoho = get_billing_platform(db, "zoho")
+        zoho.client.attach_document(draft.external_bill_id, attach_path)
+        logger.info("Reattached %s to Zoho bill %s", file_used, draft.external_bill_id)
+
+        AuditLogRepository(db).log(
+            entity_type="draft", entity_id=draft_id, action="pdf_reattached",
+            details={"bill_id": draft.external_bill_id, "filename": file_used, "source": invoice.source},
+            status="success",
+        )
+        DraftRepository(db).update(draft_id, pdf_attached_at=datetime.utcnow())
+        db.commit()
+
+        # Cleanup: delete the local file now that it's safely in Zoho
+        try:
+            os.remove(attach_path)
+            parent = os.path.dirname(attach_path)
+            if parent and os.path.isdir(parent) and not os.listdir(parent):
+                os.rmdir(parent)
+        except Exception:
+            pass
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Attachment failed: {exc}")
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+    return {"status": "success", "data": {"bill_id": draft.external_bill_id, "file": file_used, "source": invoice.source}}
 
 
 @router.post("/bulk-approve")
@@ -444,8 +616,12 @@ def bulk_push_drafts(body: dict, db: Session = Depends(get_db)):
             platform = platform_cache[draft.push_to]
 
             result = platform.push_bill(draft, db)
-            repo.update(draft_id, status="PUSHED", external_bill_id=result.get("external_id", ""), push_error=None, pushed_at=datetime.utcnow())
-            results.append({"draft_id": draft_id, "success": True, "external_bill_id": result.get("external_id")})
+            external_id = result.get("external_id", "")
+            repo.update(draft_id, status="PUSHED", external_bill_id=external_id, push_error=None, pushed_at=datetime.utcnow())
+            db.commit()
+
+            post_pipeline = _run_post_push_pipeline(draft, external_id, draft.push_to, db)
+            results.append({"draft_id": draft_id, "success": True, "external_bill_id": external_id, "pipeline": post_pipeline})
         except Exception as e:
             repo.update(draft_id, status="PUSH_FAILED", push_error=str(e))
             results.append({"draft_id": draft_id, "success": False, "error": str(e)})
@@ -639,6 +815,7 @@ def _draft_to_dict(draft) -> dict:
         "itc_status": draft.itc_status,
         "tds_applicable": draft.tds_applicable,
         "place_of_supply": draft.place_of_supply,
+        "pdf_attached_at": str(draft.pdf_attached_at) if draft.pdf_attached_at else None,
         "created_at": str(draft.created_at) if draft.created_at else None,
         "updated_at": str(draft.updated_at) if draft.updated_at else None,
     }

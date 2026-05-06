@@ -56,4 +56,7 @@ export const api = {
   put: <T>(path: string, body?: unknown) =>
     apiFetch<T>(path, { method: 'PUT', body: body ? JSON.stringify(body) : undefined }),
   delete: <T>(path: string) => apiFetch<T>(path, { method: 'DELETE' }),
+  // Multipart upload — body must be FormData
+  upload: <T>(path: string, form: FormData) =>
+    apiFetch<T>(path, { method: 'POST', body: form }),
 };

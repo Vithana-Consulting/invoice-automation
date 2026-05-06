@@ -12,9 +12,14 @@ logger = logging.getLogger(__name__)
 EDITABLE_KEYS = {
     "PARSER_MODE", "LLM_PROVIDER", "LLM_MODEL", "LLM_API_KEY", "LLM_BASE_URL",
     "LLAMAPARSE_API_KEY",
+    "STORAGE_BACKEND",
     "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REDIRECT_URI",
     "FRONTEND_URL", "DEBUG", "MAX_RETRIES",
 }
+
+# Valid values for enum-style settings
+VALID_PARSER_MODES = {"tesseract", "llamaparse", "llm"}
+VALID_STORAGE_BACKENDS = {"local", "google_drive"}
 
 # Keys that should be masked in API responses (secrets)
 SECRET_KEYS = {
@@ -85,8 +90,9 @@ class Settings(BaseSettings):
     # LlamaParse (optional parser)
     LLAMAPARSE_API_KEY: str = ""
 
-    # File storage
+    # File storage: local | google_drive
     ATTACHMENT_DIR: str = "data/attachments"
+    STORAGE_BACKEND: str = "local"
 
     # Retry
     MAX_RETRIES: int = 3

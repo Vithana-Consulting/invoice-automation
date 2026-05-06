@@ -25,5 +25,6 @@ def health_check(db: Session = Depends(get_db)):
         "parser_mode": settings.PARSER_MODE,
         "llm_provider": settings.LLM_PROVIDER if settings.PARSER_MODE == "llm" else None,
         "llm_model": settings.LLM_MODEL if settings.PARSER_MODE == "llm" else None,
+        "storage_backend": settings.STORAGE_BACKEND,
         "timestamp": datetime.utcnow().isoformat(),
     }

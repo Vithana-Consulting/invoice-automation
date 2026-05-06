@@ -100,12 +100,33 @@ def invoice_to_zoho_bill(
     if d:
         payload["due_date"] = d
 
-    # Note: place_of_supply is NOT sent to Zoho for bills — it is a sales invoice
-    # field only. Zoho derives supply type (IGST vs CGST+SGST) from vendor GST state
-    # vs org state, which is handled via tax_id / igst_tax_id selection above.
+    # destination_of_supply tells Zoho the buyer's state so it can correctly route
+    # IGST (inter-state) vs CGST+SGST (intra-state) for bills.
+    # Derived from buyer_gst_number (first 2 digits = state code).
+    buyer_gst = (getattr(invoice, "buyer_gst_number", None) or "").strip()
+    if len(buyer_gst) >= 2:
+        buyer_state_name = _gst_state_code_to_name(buyer_gst[:2])
+        if buyer_state_name:
+            payload["destination_of_supply"] = buyer_state_name
 
     payload["notes"] = f"Auto-imported from invoice {invoice.invoice_number or invoice.file_name}"
     return payload
+
+
+# GST state code → Zoho 2-letter state abbreviation (used for destination_of_supply)
+_GST_STATE_MAP = {
+    "01": "JK", "02": "HP", "03": "PB", "04": "CH", "05": "UT", "06": "HR",
+    "07": "DL", "08": "RJ", "09": "UP", "10": "BR", "11": "SK", "12": "AR",
+    "13": "NL", "14": "MN", "15": "MZ", "16": "TR", "17": "ML", "18": "AS",
+    "19": "WB", "20": "JH", "21": "OR", "22": "CG", "23": "MP", "24": "GJ",
+    "25": "DD", "26": "DN", "27": "MH", "28": "AP", "29": "KA", "30": "GA",
+    "31": "LD", "32": "KL", "33": "TN", "34": "PY", "35": "AN", "36": "TG",
+    "37": "AP", "38": "LA", "97": "OT", "99": "CJ",
+}
+
+
+def _gst_state_code_to_name(code: str) -> Optional[str]:
+    return _GST_STATE_MAP.get(code.zfill(2))
 
 
 def build_vendor_payload(vendor_name: str, gst_number: str = None,

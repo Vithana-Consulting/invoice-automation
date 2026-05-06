@@ -151,26 +151,31 @@ class ZohoBilling(BillingPlatform):
         igst_tax_id = self.config.get("igst_tax_id") or ""
         org_state_code = (self.config.get("org_state_code") or "").strip()
 
-        # Determine inter-state vs intra-state using org state code + vendor GST state.
-        # Vendor state = first 2 digits of their GSTIN (e.g. "33" = Tamil Nadu).
-        # If org_state_code is configured and vendor GST is known, pick tax_id upfront.
-        # Falls back to retry logic if org_state_code is not set.
+        # GST routing: inter-state → IGST; intra-state → CGST+SGST.
+        # The correct comparator is vendor state vs BUYER state (buyer_gst_number[:2]).
+        # org_state_code is only used as a fallback when buyer GSTIN is absent.
+        # Using org_state_code as the buyer state causes false intra-state matches when
+        # the vendor and org happen to be in the same state (e.g. both TN) even though
+        # the actual buyer is in a different state (e.g. KA).
         vendor_gst = (getattr(invoice, "gst_number", None) or "").strip()
+        buyer_gst = (getattr(invoice, "buyer_gst_number", None) or "").strip()
         vendor_state = vendor_gst[:2] if len(vendor_gst) >= 2 else ""
+        buyer_state = buyer_gst[:2] if len(buyer_gst) >= 2 else org_state_code
 
-        if org_state_code and vendor_state:
-            is_interstate = vendor_state != org_state_code
+        if vendor_state and buyer_state:
+            is_interstate = vendor_state != buyer_state
             chosen_tax_id = igst_tax_id if is_interstate else tax_id
             logger.info(
-                "GST route: org_state=%s vendor_state=%s → %s → using tax_id=%s",
-                org_state_code, vendor_state,
+                "GST route: vendor_state=%s buyer_state=%s (from %s) → %s → using tax_id=%s",
+                vendor_state, buyer_state,
+                "buyer_gst_number" if (len(buyer_gst) >= 2) else "org_state_code fallback",
                 "IGST (inter-state)" if is_interstate else "CGST+SGST (intra-state)",
                 chosen_tax_id,
             )
         else:
-            # org_state_code not configured — default to intra-state, retry if Zoho disagrees
+            # Cannot determine routing — default to intra-state, let Zoho's error retry handle it
             chosen_tax_id = tax_id
-            logger.info("org_state_code not set — defaulting to intra-state GST, will retry if needed")
+            logger.info("Cannot determine GST route (vendor_state=%r buyer_state=%r) — defaulting to intra-state", vendor_state, buyer_state)
 
         def _try_push(use_tax_id: str) -> dict:
             payload = invoice_to_zoho_bill(

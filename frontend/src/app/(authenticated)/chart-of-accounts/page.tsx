@@ -72,7 +72,7 @@ export default function ChartOfAccountsPage() {
   });
 
   const allAccounts = data?.data || [];
-  const platforms = [...new Set(allAccounts.map((a) => a.platform))];
+  const platforms = Array.from(new Set(allAccounts.map((a) => a.platform)));
   const filteredByPlatform = activeTab === 'all' ? allAccounts : allAccounts.filter((a) => a.platform === activeTab);
   const accounts = search
     ? filteredByPlatform.filter((a) => a.name.toLowerCase().includes(search.toLowerCase()) || a.code.includes(search) || (a.sub_type || '').toLowerCase().includes(search.toLowerCase()))

@@ -7,7 +7,7 @@ import { AgGridReact } from 'ag-grid-react';
 import 'ag-grid-community/styles/ag-grid.css';
 import 'ag-grid-community/styles/ag-theme-alpine.css';
 import { api, ApiError } from '@/lib/api';
-import type { ApiResponse, InvoiceDraft, ValidationBlock } from '@/types';
+import type { ApiResponse, InvoiceDraft, PushResult, ValidationBlock } from '@/types';
 import type { ColDef, CellValueChangedEvent } from 'ag-grid-community';
 import { SubTabs } from '@/components/ui/sub-tabs';
 
@@ -212,6 +212,9 @@ export default function InvoicesPage() {
     isNonOverridable: boolean;
   } | null>(null);
 
+  const [pushMessage, setPushMessage] = useState<{ type: 'success' | 'warning' | 'error'; text: string } | null>(null);
+  const [reattachModal, setReattachModal] = useState<{ draftId: number; billId: string } | null>(null);
+
   const { data, isLoading } = useQuery({
     queryKey: ['drafts'],
     queryFn: () => api.get<ApiResponse<InvoiceDraft[]> & { total: number }>('/api/drafts?limit=500'),
@@ -253,14 +256,28 @@ export default function InvoicesPage() {
 
   const pushMutation = useMutation({
     mutationFn: ({ id, body }: { id: number; body?: Record<string, string> }) =>
-      api.post(`/api/drafts/${id}/push`, body),
-    onSuccess: () => {
+      api.post<ApiResponse<PushResult>>(`/api/drafts/${id}/push`, body),
+    onSuccess: (res) => {
       queryClient.invalidateQueries({ queryKey: ['drafts'] });
       setBlockModal(null);
+      const p = res.data?.pipeline;
+      if (!p) { setPushMessage({ type: 'success', text: 'Bill pushed successfully.' }); return; }
+      const attached = p.attach === 'ok';
+      const cleaned = p.cleanup === 'ok';
+      if (attached && cleaned) {
+        setPushMessage({ type: 'success', text: 'Bill pushed, PDF attached to Zoho, local file cleaned up.' });
+      } else if (attached) {
+        setPushMessage({ type: 'success', text: 'Bill pushed and PDF attached to Zoho.' });
+      } else if (p.attach.startsWith('skipped')) {
+        setPushMessage({ type: 'warning', text: `Bill pushed. PDF not attached — ${p.attach}. Use "Attach PDF" to attach it.` });
+      } else {
+        setPushMessage({ type: 'warning', text: `Bill pushed but PDF attachment failed: ${p.attach}` });
+      }
     },
   });
 
   const handlePush = (draftId: number) => {
+    setPushMessage(null);
     pushMutation.mutate(
       { id: draftId },
       {
@@ -269,6 +286,8 @@ export default function InvoicesPage() {
             const blocks = err.detail.blocks as ValidationBlock[];
             const isNonOverridable = err.detail.error === 'NON_OVERRIDABLE_BLOCK';
             setBlockModal({ draftId, blocks, isNonOverridable });
+          } else if (err instanceof Error) {
+            setPushMessage({ type: 'error', text: err.message });
           }
         },
       }
@@ -280,7 +299,6 @@ export default function InvoicesPage() {
       { id: draftId, body: { override_reason_code: reasonCode, override_reason: reason } },
       {
         onError: (err: unknown) => {
-          // Handle 403 (not enough permissions) gracefully
           if (err instanceof ApiError && err.status === 403) {
             alert('You need admin or owner role to override compliance blocks.');
           }
@@ -288,6 +306,39 @@ export default function InvoicesPage() {
       }
     );
   };
+
+  // Gmail source: POST with no body — backend re-downloads from Gmail
+  const reattachGmailMutation = useMutation({
+    mutationFn: (draftId: number) =>
+      api.post<ApiResponse<{ bill_id: string; file: string }>>(`/api/drafts/${draftId}/reattach`),
+    onSuccess: (res) => {
+      queryClient.invalidateQueries({ queryKey: ['drafts'] });
+      setPushMessage({ type: 'success', text: `PDF attached to Zoho bill ${res.data?.bill_id}.` });
+    },
+    onError: (err: unknown) => {
+      const msg = err instanceof Error ? err.message : 'Reattach failed';
+      setPushMessage({ type: 'error', text: `Attach failed: ${msg}` });
+    },
+  });
+
+  // Manual upload source: POST with file body
+  const reattachMutation = useMutation({
+    mutationFn: ({ draftId, file }: { draftId: number; file: File }) => {
+      const form = new FormData();
+      form.append('file', file);
+      return api.upload<ApiResponse<{ bill_id: string; file: string }>>(`/api/drafts/${draftId}/reattach`, form);
+    },
+    onSuccess: (res) => {
+      queryClient.invalidateQueries({ queryKey: ['drafts'] });
+      setReattachModal(null);
+      setPushMessage({ type: 'success', text: `PDF attached to Zoho bill ${res.data?.bill_id}.` });
+    },
+    onError: (err: unknown) => {
+      const msg = err instanceof Error ? err.message : 'Reattach failed';
+      setPushMessage({ type: 'error', text: `Attach failed: ${msg}` });
+      setReattachModal(null);
+    },
+  });
 
   const bulkApproveMutation = useMutation({
     mutationFn: (ids: number[]) => api.post('/api/drafts/bulk-approve', { draft_ids: ids }),
@@ -428,6 +479,17 @@ export default function InvoicesPage() {
     },
     { field: 'external_bill_id', headerName: 'Bill ID', width: 120 },
     {
+      headerName: 'PDF',
+      width: 80,
+      cellRenderer: (p: { data: InvoiceDraft }) => {
+        if (p.data?.status !== 'PUSHED') return null;
+        if (p.data?.pdf_attached_at) {
+          return <span className="text-xs text-green-600 font-medium" title={`Attached ${p.data.pdf_attached_at}`}>✓ Attached</span>;
+        }
+        return <span className="text-xs text-amber-500 italic" title="PDF not yet attached to Zoho bill">Missing</span>;
+      },
+    },
+    {
       field: 'validation_errors',
       headerName: 'Blocks',
       width: 220,
@@ -504,6 +566,24 @@ export default function InvoicesPage() {
                 {draft.status === 'PUSH_FAILED' ? 'Retry' : 'Push'}
               </button>
             )}
+            {draft.status === 'PUSHED' && draft.push_to === 'zoho' && !draft.pdf_attached_at && (
+              <button
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (draft.source === 'gmail') {
+                    reattachGmailMutation.mutate(draft.id);
+                  } else {
+                    setReattachModal({ draftId: draft.id, billId: draft.external_bill_id || '' });
+                  }
+                }}
+                disabled={reattachGmailMutation.isPending}
+                title={draft.source === 'gmail' ? 'Re-download from Gmail and attach to Zoho bill' : 'Upload and attach the invoice PDF to this Zoho bill'}
+                className="px-2 py-1 text-xs bg-indigo-100 text-indigo-700 rounded hover:bg-indigo-200 disabled:opacity-50"
+              >
+                {reattachGmailMutation.isPending ? '...' : 'Attach PDF'}
+              </button>
+            )}
             {(draft.status === 'PUSH_FAILED' || hasBlocks) && (
               <button
                 onMouseDown={(e) => e.stopPropagation()}
@@ -522,7 +602,7 @@ export default function InvoicesPage() {
         );
       },
     },
-  ], [approveMutation, pushMutation, reparseMutation, handlePush]);  // eslint-disable-line react-hooks/exhaustive-deps
+  ], [approveMutation, pushMutation, reparseMutation, reattachMutation, reattachGmailMutation, handlePush, setReattachModal]);  // eslint-disable-line react-hooks/exhaustive-deps
 
   const onCellValueChanged = useCallback((event: CellValueChangedEvent) => {
     const draft = event.data as InvoiceDraft;
@@ -630,6 +710,44 @@ export default function InvoicesPage() {
         }`}>
           <span>{reparseMessage.text}</span>
           <button onClick={() => setReparseMessage(null)} className="text-xs ml-4 opacity-60 hover:opacity-100">dismiss</button>
+        </div>
+      )}
+
+      {pushMessage && (
+        <div className={`mb-4 p-3 rounded-lg text-sm flex items-center justify-between ${
+          pushMessage.type === 'success' ? 'bg-blue-50 text-blue-700 border border-blue-200' :
+          pushMessage.type === 'warning' ? 'bg-amber-50 text-amber-700 border border-amber-200' :
+          'bg-red-50 text-red-700 border border-red-200'
+        }`}>
+          <span>{pushMessage.type === 'success' ? '✓ ' : pushMessage.type === 'warning' ? '⚠ ' : '✗ '}{pushMessage.text}</span>
+          <button onClick={() => setPushMessage(null)} className="text-xs ml-4 opacity-60 hover:opacity-100">dismiss</button>
+        </div>
+      )}
+
+      {reattachModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setReattachModal(null)}>
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-md mx-4 p-6" onClick={(e) => e.stopPropagation()}>
+            <h2 className="text-base font-semibold text-gray-800 mb-1">Attach Invoice PDF</h2>
+            <p className="text-sm text-gray-500 mb-4">
+              Upload the original invoice PDF to attach it to Zoho bill <span className="font-mono text-xs bg-gray-100 px-1 rounded">{reattachModal.billId}</span>.
+              The file will be attached directly and not stored locally.
+            </p>
+            <input
+              type="file"
+              accept=".pdf,.jpg,.jpeg,.png"
+              className="block w-full text-sm text-gray-600 border border-gray-200 rounded-lg p-2 mb-4 cursor-pointer file:mr-3 file:py-1 file:px-3 file:rounded file:border-0 file:text-xs file:bg-indigo-50 file:text-indigo-700"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) reattachMutation.mutate({ draftId: reattachModal.draftId, file });
+              }}
+            />
+            <div className="flex justify-end gap-2">
+              <button onClick={() => setReattachModal(null)} className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800">Cancel</button>
+            </div>
+            {reattachMutation.isPending && (
+              <p className="text-xs text-indigo-600 mt-2">Attaching to Zoho…</p>
+            )}
+          </div>
         </div>
       )}
 

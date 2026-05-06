@@ -15,6 +15,19 @@ export interface ValidationBlock {
   non_overridable?: boolean;
 }
 
+export interface PushPipeline {
+  attach: string;   // "ok" | "skipped — ..." | "failed — ..."
+  cleanup: string;  // "ok" | "skipped" | "failed — ..."
+  file: string | null;
+}
+
+export interface PushResult {
+  draft_id: number;
+  external_bill_id: string;
+  platform: string;
+  pipeline: PushPipeline;
+}
+
 export interface InvoiceDraft {
   id: number;
   invoice_id: number;
@@ -45,6 +58,9 @@ export interface InvoiceDraft {
   itc_status: string | null;
   tds_applicable: boolean | null;
   place_of_supply: string | null;
+  pdf_attached_at: string | null;
+  // pipeline result from last push (null until first push attempt)
+  last_pipeline: PushPipeline | null;
   created_at: string;
   updated_at: string;
 }

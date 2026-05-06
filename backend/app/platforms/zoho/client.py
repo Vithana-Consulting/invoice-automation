@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 
 import httpx
 
@@ -86,6 +87,23 @@ class ZohoClient:
             if b.get("bill_number") == bill_number:
                 return b
         return None
+
+    def attach_document(self, bill_id: str, file_path: str) -> dict:
+        """Attach a file to a Zoho bill via multipart/form-data.
+
+        Attachment failure should be caught by the caller — bill is already created.
+        """
+        url = f"{self.base_url}/bills/{bill_id}/attachment"
+        file_name = os.path.basename(file_path)
+        with open(file_path, "rb") as f:
+            resp = httpx.post(
+                url,
+                headers={"Authorization": f"Zoho-oauthtoken {self.auth.get_access_token()}"},
+                params=self._params(),
+                files={"attachment": (file_name, f, "application/octet-stream")},
+                timeout=60,
+            )
+        return self._handle_response(resp)
 
     def list_chartofaccounts(self) -> list:
         """Fetch all Chart of Accounts from Zoho Books with pagination."""

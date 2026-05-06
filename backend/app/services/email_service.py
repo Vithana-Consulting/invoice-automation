@@ -15,6 +15,7 @@ from app.core.exceptions import EmailFetchError
 from app.db.repository import AuditLogRepository, EmailRepository, InvoiceRepository
 from app.models.db_models import InvoiceRecord, ProcessedEmail
 from app.services.invoice_service import InvoiceService
+from app.services.drive_upload import try_drive_upload
 
 logger = logging.getLogger(__name__)
 
@@ -215,6 +216,10 @@ class EmailService:
                 )
                 invoice_record = self.invoice_repo.create(invoice_record)
 
+                drive_file_id = try_drive_upload(file_path, invoice_record, self.db)
+                if drive_file_id:
+                    self.invoice_repo._update(invoice_record.id, drive_file_id=drive_file_id)
+
                 if invoice_service.parse_invoice(invoice_record.id):
                     stats["invoices_parsed"] += 1
 
@@ -252,3 +257,94 @@ class EmailService:
             f.write(data)
         logger.info("Downloaded attachment: %s (%d bytes)", att["filename"], len(data))
         return file_path
+
+
+def redownload_invoice_from_gmail(invoice, db) -> str | None:
+    """Re-download an invoice PDF from Gmail when the local file no longer exists.
+
+    Extracts the Gmail message ID from the stored file_path directory name
+    (structure: data/attachments/{msg_id}/{filename}), fetches the message,
+    finds the matching attachment, and saves it back to the original path.
+
+    Returns the local file path on success, None if re-download is not possible.
+    """
+    try:
+        from app.db.repository import IntegrationRepository
+        from app.platforms.base import decrypt_config
+        from google.auth.transport.requests import Request
+        from google.oauth2.credentials import Credentials
+        from googleapiclient.discovery import build
+
+        if not invoice or not invoice.file_path or invoice.source != "gmail":
+            return None
+
+        # Extract msg_id from path: data/attachments/{msg_id}/{filename}
+        parts = invoice.file_path.replace("\\", "/").split("/")
+        # Find the segment just before the filename (the msg_id directory)
+        if len(parts) < 2:
+            return None
+        msg_id = parts[-2]
+        file_name = parts[-1]
+
+        if not msg_id or msg_id in ("attachments", "data"):
+            return None
+
+        # Load Gmail credentials for this tenant
+        repo = IntegrationRepository(db)
+        integration = repo.get_by_platform("gmail")
+        if not integration or not integration.is_enabled:
+            logger.warning("Gmail integration not configured — cannot re-download %s", invoice.file_name)
+            return None
+
+        config = decrypt_config(integration.config_encrypted)
+        token_data = config.get("token_json")
+        if not token_data:
+            return None
+        if isinstance(token_data, str):
+            import json
+            token_data = json.loads(token_data)
+
+        creds = Credentials.from_authorized_user_info(token_data)
+        if creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        if not creds.valid:
+            logger.warning("Gmail OAuth token invalid — cannot re-download %s", invoice.file_name)
+            return None
+
+        service = build("gmail", "v1", credentials=creds)
+
+        # Fetch the message and find the attachment matching file_name
+        msg = service.users().messages().get(userId="me", id=msg_id, format="full").execute()
+        att_id = _find_attachment_id(msg.get("payload", {}), file_name)
+        if not att_id:
+            logger.warning("Attachment %s not found in Gmail message %s", file_name, msg_id)
+            return None
+
+        attachment = service.users().messages().attachments().get(
+            userId="me", messageId=msg_id, id=att_id
+        ).execute()
+        data = base64.urlsafe_b64decode(attachment["data"])
+
+        # Restore to original path
+        dest = os.path.abspath(invoice.file_path)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        with open(dest, "wb") as f:
+            f.write(data)
+
+        logger.info("Re-downloaded %s from Gmail message %s (%d bytes)", file_name, msg_id, len(data))
+        return dest
+
+    except Exception as exc:
+        logger.warning("Gmail re-download failed for invoice %s: %s", getattr(invoice, "id", "?"), exc)
+        return None
+
+
+def _find_attachment_id(payload: dict, filename: str) -> str | None:
+    """Recursively search Gmail message parts for an attachment matching filename."""
+    if payload.get("filename") == filename and payload.get("body", {}).get("attachmentId"):
+        return payload["body"]["attachmentId"]
+    for part in payload.get("parts", []):
+        result = _find_attachment_id(part, filename)
+        if result:
+            return result
+    return None

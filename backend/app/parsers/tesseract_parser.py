@@ -28,11 +28,13 @@ PAN_PATTERN = re.compile(r"\b([A-Z]{5}\d{4}[A-Z])\b")
 # UAN: 12 digits
 UAN_PATTERN = re.compile(r"\bUAN\s*:?\s*(\d{12})\b", re.IGNORECASE)
 
-# Invoice number patterns
+# Invoice number patterns — captured value must contain a digit (all real invoice numbers do)
 INVOICE_NUM_PATTERNS = [
-    re.compile(r"(?:Invoice|Inv|Bill)\s*(?:No|Number|#|Num)[.:\s#\-]*([A-Z0-9][\w\-/]{2,30})", re.IGNORECASE),
-    re.compile(r"(?:Invoice|Inv)\s*[:.#\-]\s*(\S+)", re.IGNORECASE),
-    re.compile(r"#\s*([A-Z0-9][\w\-/]{2,30})", re.IGNORECASE),
+    # Explicit label: require at least one digit in the captured token
+    re.compile(r"(?:Invoice|Inv|Bill)\s*(?:No|Number|#|Num)[.:\s#\-]*([A-Z0-9][\w\-/]*\d[\w\-/]*)", re.IGNORECASE),
+    re.compile(r"(?:Invoice|Inv)\s*[:.#\-]\s*([A-Z0-9][\w\-/]*\d[\w\-/]*)", re.IGNORECASE),
+    # Indian-style tax invoice numbers: CA/25-26/340, INV/2024-25/696, CA/25\x0026/340 (OCR null bytes)
+    re.compile(r"\b([A-Z]{2,4}[/\-]\d{2,4}[\-\x00]\d{2,4}[/\-]\d{1,6})\b", re.IGNORECASE),
 ]
 
 # Date patterns
@@ -76,9 +78,9 @@ DUE_DATE_PATTERNS = [
 
 # Invoice date
 INVOICE_DATE_PATTERNS = [
-    re.compile(r"(?:Invoice\s*Date|Date\s*of\s*Invoice|Bill\s*Date|Date)\s*[:\s]*(\d{1,2}[/\-]\d{1,2}[/\-]\d{4})", re.IGNORECASE),
-    re.compile(r"(?:Invoice\s*Date|Date\s*of\s*Invoice|Bill\s*Date|Date)\s*[:\s]*(\d{4}[/\-]\d{1,2}[/\-]\d{1,2})", re.IGNORECASE),
-    re.compile(r"(?:Invoice\s*Date|Bill\s*Date|Date)\s*[:\s]*(\d{1,2}\s+\w+\s+\d{4})", re.IGNORECASE),
+    re.compile(r"(?:Invoice\s*Date|Date\s*of\s*Invoice|Bill\s*Date|Dated|Date)\s*[:\s]*(\d{1,2}[/\-]\d{1,2}[/\-]\d{4})", re.IGNORECASE),
+    re.compile(r"(?:Invoice\s*Date|Date\s*of\s*Invoice|Bill\s*Date|Dated|Date)\s*[:\s]*(\d{4}[/\-]\d{1,2}[/\-]\d{1,2})", re.IGNORECASE),
+    re.compile(r"(?:Invoice\s*Date|Bill\s*Date|Dated|Date)\s*[:\s]*(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s+\d{4})", re.IGNORECASE),
 ]
 
 

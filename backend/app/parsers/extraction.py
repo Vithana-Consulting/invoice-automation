@@ -186,12 +186,19 @@ def extract_total_amount(text: str) -> Optional[float]:
 
 
 def extract_invoice_number(text: str) -> Optional[str]:
-    """Extract invoice number with improved patterns. Works line-by-line to avoid cross-line matches."""
+    """Extract invoice number with improved patterns. Works line-by-line to avoid cross-line matches.
+
+    All candidates must contain at least one digit — real invoice numbers always do.
+    Handles OCR null-byte artifacts (e.g. CA/25\x0026/340 where \x00 replaces the dash).
+    """
     patterns = [
         re.compile(r"(?:Invoice\s*Number|Invoice\s*No\.?|Inv\s*No\.?|Invoice\s*#|INVOICE\s*#)\s*[:\s#\-]*([A-Z0-9][\w\-/]{2,30})", re.IGNORECASE),
         re.compile(r"(?:Bill\s*No\.?|Bill\s*Number)\s*[:\s#\-]*([A-Z0-9][\w\-/]{2,30})", re.IGNORECASE),
         re.compile(r"(?:Receipt\s*Number)\s*[:\s#\-]*([A-Z0-9][\w\-/]{2,30})", re.IGNORECASE),
         re.compile(r"(?:Invoice|Inv)\s*[:.#\-]\s*([A-Z0-9][\w\-/]{2,30})", re.IGNORECASE),
+        # Indian tax invoice format: CA/25-26/340, INV/2024-25/696
+        # Also handles OCR null-byte artefacts where '-' becomes '\x00'
+        re.compile(r"\b([A-Z]{2,6}[/\-]\d{2,4}[\-\x00]\d{2,4}[/\-]\d{1,6})\b", re.IGNORECASE),
     ]
 
     # Search line by line to avoid cross-line captures
@@ -203,7 +210,11 @@ def extract_invoice_number(text: str) -> Optional[str]:
             m = pat.search(line)
             if m:
                 candidate = m.group(1).strip()
-                if len(candidate) >= 3:
+                # Must be at least 3 chars AND contain at least one digit
+                # (filters prose matches like "invoice no signature required")
+                if len(candidate) >= 3 and any(c.isdigit() for c in candidate):
+                    # Normalise OCR null-byte artefacts back to dashes
+                    candidate = candidate.replace("\x00", "-")
                     return candidate
 
     return None

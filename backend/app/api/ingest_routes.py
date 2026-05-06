@@ -14,6 +14,7 @@ from app.db.repository import InvoiceRepository
 from app.db.session import get_db
 from app.models.db_models import InvoiceRecord
 from app.services.draft_service import DraftService
+from app.services.drive_upload import try_drive_upload
 from app.services.invoice_service import InvoiceService
 
 logger = logging.getLogger(__name__)
@@ -206,6 +207,10 @@ async def ingest_upload(file: UploadFile = File(...), db: Session = Depends(get_
         source="manual_upload",
     )
     invoice_record = invoice_repo.create(invoice_record)
+
+    drive_file_id = try_drive_upload(file_path, invoice_record, db)
+    if drive_file_id:
+        invoice_repo._update(invoice_record.id, drive_file_id=drive_file_id)
 
     invoice_service = InvoiceService(db)
     parsed = invoice_service.parse_invoice(invoice_record.id)

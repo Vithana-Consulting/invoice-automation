@@ -165,6 +165,9 @@ class InvoiceRecord(Base):
     source = Column(String(50), default="gmail")
     source_ref = Column(String(255), nullable=True)
 
+    # Cloud storage
+    drive_file_id = Column(String(255), nullable=True)
+
     # Legacy Zoho fields (kept for backward compat)
     zoho_push_status = Column(String(20), nullable=True)
     zoho_bill_id = Column(String(100), nullable=True)
@@ -298,6 +301,7 @@ class InvoiceDraft(Base):
     place_of_supply = Column(String(5), nullable=True)   # 2-char GST state code
     itc_status = Column(String(20), nullable=True, default="UNCONFIRMED")  # UNCONFIRMED/CONFIRMED/INELIGIBLE/NA
     tds_applicable = Column(Boolean, nullable=True)      # manual checkbox
+    pdf_attached_at = Column(DateTime, nullable=True)
 
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
