@@ -21,7 +21,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import tempfile
+from datetime import datetime
 
 from app.config import settings
 from app.core.exceptions import ParsingError
@@ -31,9 +33,116 @@ from app.parsers.llm_providers import get_llm_provider
 
 logger = logging.getLogger(__name__)
 
+MAX_PARSE_ATTEMPTS = 3
+
 SUPPORTED_TYPES = {"pdf", "jpg", "jpeg", "png", "tiff", "tif", "bmp"}
 
 IMAGE_TYPES = {"jpg", "jpeg", "png", "tiff", "tif", "bmp", "webp"}
+
+# ---------------------------------------------------------------------------
+# GSTIN validation
+# ---------------------------------------------------------------------------
+
+_GSTIN_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+_GSTIN_PATTERN = re.compile(r"^\d{2}[A-Z]{5}\d{4}[A-Z]\d[Z][A-Z\d]$")
+
+
+def _validate_gstin_checksum(gstin: str) -> bool:
+    """Validate GSTIN format + checksum (detects single-char transpositions)."""
+    if not _GSTIN_PATTERN.match(gstin.upper()):
+        return False
+    total = 0
+    for i, ch in enumerate(gstin.upper()[:14]):
+        val = _GSTIN_CHARS.index(ch)
+        if i % 2 == 1:
+            val *= 2
+        total += val // 36 + val % 36
+    expected_idx = (36 - (total % 36)) % 36
+    return gstin.upper()[14] == _GSTIN_CHARS[expected_idx]
+
+
+# ---------------------------------------------------------------------------
+# Legal entity suffixes used for vendor_name completeness check
+# ---------------------------------------------------------------------------
+
+_LEGAL_SUFFIXES = [
+    "Private Limited", "Limited", "LLP", "Ltd", "Inc", "Corp", "Pvt",
+    "Associates", "Enterprises", "Services", "Solutions", "Works",
+    "Technologies", "Consulting", "Systems",
+]
+
+
+def _validate_invoice(invoice) -> list[str]:
+    """Return a list of human-readable validation error strings (empty = valid)."""
+    errors: list[str] = []
+
+    # 1. invoice_number
+    if not invoice.invoice_number or len(str(invoice.invoice_number).strip()) < 3:
+        errors.append("invoice_number is missing or too short (must be ≥ 3 characters)")
+
+    # 2. vendor_name
+    if not invoice.vendor_name or len(str(invoice.vendor_name).strip()) < 2:
+        errors.append("vendor_name is missing or too short (must be ≥ 2 characters)")
+
+    # 3. total_amount
+    if invoice.total_amount is None or invoice.total_amount <= 0:
+        errors.append("total_amount is missing or not > 0")
+
+    # 4. invoice_date
+    raw_date = invoice.date
+    if not raw_date:
+        errors.append("invoice_date is missing")
+    else:
+        try:
+            datetime.strptime(str(raw_date).strip(), "%Y-%m-%d")
+        except ValueError:
+            errors.append(f"invoice_date '{raw_date}' is not a valid YYYY-MM-DD date")
+
+    # 5. vendor GSTIN checksum
+    if invoice.gst_number:
+        if not _validate_gstin_checksum(invoice.gst_number):
+            errors.append(
+                f"vendor_gstin '{invoice.gst_number}' failed checksum — "
+                "re-read it character by character from the invoice"
+            )
+
+    # 6. buyer GSTIN checksum
+    if invoice.buyer_gst_number:
+        if not _validate_gstin_checksum(invoice.buyer_gst_number):
+            errors.append(
+                f"vendor_gstin '{invoice.buyer_gst_number}' failed checksum — "
+                "re-read it character by character from the invoice"
+            )
+
+    # 7. vendor_name legal suffix check (only when vendor has a GSTIN — i.e. registered entity)
+    if invoice.gst_number and invoice.vendor_name:
+        name = invoice.vendor_name
+        if not any(suffix.lower() in name.lower() for suffix in _LEGAL_SUFFIXES):
+            errors.append(
+                f"vendor_name '{name}' may be truncated — verify it includes the complete "
+                "legal entity name (e.g. 'Private Limited', 'LLP') as printed on the invoice"
+            )
+
+    return errors
+
+
+def _build_correction_section(errors: list[str], attempt: int, max_attempts: int) -> str:
+    """Build the correction prompt appendix for retry attempts."""
+    bullet_lines = "\n".join(f"  • {e}" for e in errors)
+    return (
+        f"\n\n─── CORRECTION REQUIRED (Attempt {attempt}/{max_attempts}) ───\n"
+        f"Your previous extraction had {len(errors)} validation error(s) that must be fixed:\n"
+        f"{bullet_lines}\n\n"
+        "Instructions:\n"
+        "- Re-examine the invoice image carefully for each flagged field\n"
+        "- For GSTINs: read every character individually — transposing even one letter/digit "
+        "causes tax reconciliation failures\n"
+        "- For vendor_name: copy the COMPLETE legal name exactly as printed, including "
+        "'Private Limited', 'LLP', etc.\n"
+        "- Return the complete corrected JSON (all fields, not just the changed ones)\n"
+        "─────────────────────────────────────────────────────────"
+    )
+
 
 EXTRACTION_PROMPT = """You are an invoice data extraction system. Extract structured data from this invoice.
 
@@ -103,6 +212,8 @@ IMPORTANT:
 - hsn_or_sac: look for columns labelled "HSN", "SAC", "HSN/SAC", "HSN Code", "SAC Code" on every line item row. For Indian service invoices, SAC codes are 6-digit numbers (e.g. 998211, 998314). Extract even if the column header is abbreviated. If no code is printed on a line item, return null for that item.
 - tax_rate: for EACH line item, extract the GST/tax rate percentage from the "Tax Rate", "GST Rate", "Rate %", or "IGST/CGST/SGST %" column. Express as a plain number (e.g. 18 for 18% GST, 9 for 9% CGST). If the line item shows separate CGST+SGST rates, sum them for tax_rate (e.g. CGST 9% + SGST 9% = tax_rate 18). Do NOT leave tax_rate null if a tax rate column or percentage is printed for that line item.
 - confidence_scores: for each key field, rate your confidence 0.0–1.0. Use 1.0 only if the value is unambiguous and clearly printed. Use 0.7–0.9 if the field required inference. Use below 0.7 if the field is partially obscured, ambiguous, or required guessing. invoice_number confidence should be 1.0 only if every digit was clearly legible.
+- vendor_name: copy the COMPLETE legal name exactly as printed, including the entity type suffix such as 'Private Limited', 'Limited', 'LLP', 'Pvt. Ltd.', 'Associates', etc. Never truncate the company name.
+- gst_number and buyer_gst_number: read every character individually — GSTINs are 15 characters, format: 2 digits + 5 uppercase letters + 4 digits + 1 uppercase letter + 1 digit + 'Z' + 1 alphanumeric. Transposing even one character causes GST/ITC reconciliation failures.
 - Return ONLY the JSON object, no other text"""
 
 
@@ -175,10 +286,41 @@ class LLMParser(InvoiceParser):
 
             logger.info("Sending %d image(s) to %s/%s for extraction", len(image_paths), provider_name, model)
 
-            response_text = provider.call_with_images(EXTRACTION_PROMPT, image_paths)
-            if not response_text:
-                raise ParsingError(f"LLM returned empty response for {file_path}")
-            return self._parse_response(response_text, provider_name, model, file_path)
+            last_invoice = None
+            last_errors: list[str] = []
+
+            for attempt in range(1, MAX_PARSE_ATTEMPTS + 1):
+                prompt = EXTRACTION_PROMPT
+                if attempt > 1 and last_errors:
+                    prompt += _build_correction_section(last_errors, attempt, MAX_PARSE_ATTEMPTS)
+
+                response_text = provider.call_with_images(prompt, image_paths)
+                if not response_text:
+                    raise ParsingError(f"LLM returned empty response for {file_path}")
+
+                last_invoice = self._parse_response(response_text, provider_name, model, file_path)
+                last_errors = _validate_invoice(last_invoice)
+
+                if not last_errors:
+                    if attempt > 1:
+                        logger.info(
+                            "Invoice %s validated successfully on attempt %d",
+                            file_path, attempt,
+                        )
+                    return last_invoice
+
+                logger.warning(
+                    "Invoice %s attempt %d/%d validation errors: %s",
+                    file_path, attempt, MAX_PARSE_ATTEMPTS, last_errors,
+                )
+
+            # Exhausted retries — return best effort but log clearly
+            logger.error(
+                "Invoice %s failed validation after %d attempts. "
+                "Returning best-effort result. Errors: %s",
+                file_path, MAX_PARSE_ATTEMPTS, last_errors,
+            )
+            return last_invoice
 
         except ParsingError:
             raise
@@ -204,13 +346,43 @@ class LLMParser(InvoiceParser):
         if not raw_text.strip():
             raise ParsingError(f"No text extracted from {file_path}")
 
-        prompt = EXTRACTION_PROMPT + "\n\nInvoice text:\n" + raw_text[:15000]
+        base_prompt = EXTRACTION_PROMPT + "\n\nInvoice text:\n" + raw_text[:15000]
 
         try:
-            response_text = provider.call(prompt)
-            invoice = self._parse_response(response_text, provider_name, model, file_path)
-            invoice.raw_text = raw_text[:50000]
-            return invoice
+            last_invoice = None
+            last_errors: list[str] = []
+
+            for attempt in range(1, MAX_PARSE_ATTEMPTS + 1):
+                prompt = base_prompt
+                if attempt > 1 and last_errors:
+                    prompt += _build_correction_section(last_errors, attempt, MAX_PARSE_ATTEMPTS)
+
+                response_text = provider.call(prompt)
+                last_invoice = self._parse_response(response_text, provider_name, model, file_path)
+                last_invoice.raw_text = raw_text[:50000]
+                last_errors = _validate_invoice(last_invoice)
+
+                if not last_errors:
+                    if attempt > 1:
+                        logger.info(
+                            "Invoice %s validated successfully on attempt %d",
+                            file_path, attempt,
+                        )
+                    return last_invoice
+
+                logger.warning(
+                    "Invoice %s attempt %d/%d validation errors: %s",
+                    file_path, attempt, MAX_PARSE_ATTEMPTS, last_errors,
+                )
+
+            # Exhausted retries — return best effort but log clearly
+            logger.error(
+                "Invoice %s failed validation after %d attempts. "
+                "Returning best-effort result. Errors: %s",
+                file_path, MAX_PARSE_ATTEMPTS, last_errors,
+            )
+            return last_invoice
+
         except ParsingError:
             raise
         except Exception as e:

@@ -70,5 +70,59 @@
     "invoice_date": "12-Jan-2025",
     "total_amount": 6317.0,
     "gst_type": "IGST"
+  },
+  "invoice_I1.pdf": {
+    "vendor_name": "SUNRISE CREATIVE SERVICES",
+    "vendor_gstin": null,
+    "buyer_gstin": "29AAHCE1996R1ZL",
+    "invoice_number": "SCS/PF/2025/031",
+    "invoice_date": "2025-03-10",
+    "total_amount": 17000.0,
+    "gst_type": "EXEMPT"
+  },
+  "invoice_J1.pdf": {
+    "vendor_name": "GREENLEAF CATERING & EVENTS PVT. LTD.",
+    "vendor_gstin": "29AABCG7712E1Z5",
+    "buyer_gstin": "29AAHCE1996R1ZL",
+    "invoice_number": "GCE/2025/KA/0278",
+    "invoice_date": "2025-02-15",
+    "total_amount": 57210.0,
+    "gst_type": "CGST+SGST"
+  },
+  "invoice_K1.pdf": {
+    "vendor_name": "INDIGO DIGITAL SOLUTIONS PRIVATE LIMITED",
+    "vendor_gstin": "27AABCI4431F1ZM",
+    "buyer_gstin": "29AAHCE1996R1ZL",
+    "invoice_number": "IDS/EXP/2025/0094",
+    "invoice_date": "2025-02-28",
+    "total_amount": 6885.0,
+    "gst_type": "ZERO_RATED"
+  },
+  "invoice_L1.pdf": {
+    "vendor_name": "VAIDYA LAW ASSOCIATES",
+    "vendor_gstin": "07AAAPV2231K1ZB",
+    "buyer_gstin": "29AAHCE1996R1ZL",
+    "invoice_number": "VLA/2025/INV/0156",
+    "invoice_date": "2025-01-22",
+    "total_amount": 87910.0,
+    "gst_type": "IGST"
+  },
+  "invoice_M1.pdf": {
+    "vendor_name": "PINNACLE TECH DISTRIBUTION PVT. LTD.",
+    "vendor_gstin": "29AABCP8834J1ZQ",
+    "buyer_gstin": "29AAHCE1996R1ZL",
+    "invoice_number": "PTD/KA/2025/00634",
+    "invoice_date": "2025-03-05",
+    "total_amount": 36869.10,
+    "gst_type": "CGST+SGST"
+  },
+  "invoice_N1.pdf": {
+    "vendor_name": "VENDATA NETWORK & INFRASTRUCTURE SERVICES PRIVATE LIMITED",
+    "vendor_gstin": "29AABCV5523H1ZR",
+    "buyer_gstin": "29AAHCE1996R1ZL",
+    "invoice_number": "VND/2024-25/KA/BLR/00891",
+    "invoice_date": "2025-03-31",
+    "total_amount": 322440.0,
+    "gst_type": "CGST+SGST"
   }
 }
