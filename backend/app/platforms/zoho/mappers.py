@@ -55,11 +55,15 @@ def invoice_to_zoho_bill(
         # Per-line account: HSN match → draft-level → integration fallback
         line_account_id = hsn_map.get(hsn) or draft_account_id
 
+        description = item.get("description") or "Invoice item"
         zi = {
-            "name": item.get("description", "Invoice item"),
+            "name": description,
+            "description": description,
             "rate": item.get("unit_price") or item.get("amount", 0),
             "quantity": item.get("quantity", 1) or 1,
         }
+        if hsn:
+            zi["hsn_or_sac"] = hsn
         if line_account_id:
             zi["account_id"] = line_account_id
         # Zoho computes CGST/SGST/IGST automatically from this tax_id
@@ -69,9 +73,12 @@ def invoice_to_zoho_bill(
 
     if not zoho_items:
         amount = float(invoice.total_amount) if invoice.total_amount else 0.0
+        fallback_name = f"Invoice {invoice.invoice_number or invoice.file_name or 'item'}"
         zi = {
-            "name": f"Invoice {invoice.invoice_number or invoice.file_name or 'item'}",
-            "rate": amount, "quantity": 1,
+            "name": fallback_name,
+            "description": fallback_name,
+            "rate": amount,
+            "quantity": 1,
         }
         if draft_account_id:
             zi["account_id"] = draft_account_id
