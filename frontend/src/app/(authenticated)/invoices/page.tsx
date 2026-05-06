@@ -7,7 +7,7 @@ import { AgGridReact } from 'ag-grid-react';
 import 'ag-grid-community/styles/ag-grid.css';
 import 'ag-grid-community/styles/ag-theme-alpine.css';
 import { api, ApiError } from '@/lib/api';
-import type { ApiResponse, InvoiceDraft, PushResult, ValidationBlock } from '@/types';
+import type { ApiResponse, InvoiceDraft, PushResult, ValidationBlock, CompanyBankAccount, InvoicePayment, PaymentSummary, VendorBankDetails } from '@/types';
 import type { ColDef, CellValueChangedEvent } from 'ag-grid-community';
 import { SubTabs } from '@/components/ui/sub-tabs';
 
@@ -198,12 +198,431 @@ function PushBlockModal({ draftId, blocks, isNonOverridable, onClose, onOverride
   );
 }
 
+// ─── Bank & Payment Panel ─────────────────────────────────────────────────────
+
+const PAYMENT_METHOD_LABELS: Record<string, string> = {
+  NEFT: 'UTR Number',
+  RTGS: 'UTR Number',
+  IMPS: 'UTR Number',
+  UPI: 'UPI Transaction ID',
+  CHEQUE: 'Cheque Number',
+  DD: 'DD Number',
+  CASH: 'Reference',
+};
+
+const TDS_SECTIONS = ['194C', '194J', '194I', '194H', '194Q', 'OTHER'];
+
+const PAYMENT_STATUS_COLORS: Record<string, string> = {
+  INITIATED: 'bg-blue-100 text-blue-700',
+  PENDING_CLEARANCE: 'bg-yellow-100 text-yellow-700',
+  CLEARED: 'bg-green-100 text-green-700',
+  BOUNCED: 'bg-red-100 text-red-700',
+  CANCELLED: 'bg-gray-100 text-gray-500',
+};
+
+function maskAccountNumber(num: string | null | undefined): string {
+  if (!num) return 'Not extracted';
+  if (num.length <= 8) return num;
+  return num.slice(0, 4) + 'X'.repeat(num.length - 8) + num.slice(-4);
+}
+
+interface RecordPaymentForm {
+  payment_date: string;
+  payment_method: string;
+  payment_amount: string;
+  payment_reference: string;
+  payer_bank_account_id: string;
+  payee_account_number: string;
+  payee_ifsc_code: string;
+  payee_upi_id: string;
+  tds_amount: string;
+  tds_section: string;
+  remarks: string;
+  payment_type: string;
+}
+
+function BankPaymentPanel({ draft }: { draft: InvoiceDraft }) {
+  const queryClient = useQueryClient();
+  const [detailTab, setDetailTab] = useState<'bank' | 'payments'>('bank');
+  const [showPaymentForm, setShowPaymentForm] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+
+  const bankDetails: VendorBankDetails | null = draft.bank_details || null;
+  const today = new Date().toISOString().split('T')[0];
+
+  const [form, setForm] = useState<RecordPaymentForm>({
+    payment_date: today,
+    payment_method: 'NEFT',
+    payment_amount: draft.amount_due != null
+      ? String(draft.amount_due)
+      : draft.total_amount != null ? String(draft.total_amount) : '',
+    payment_reference: '',
+    payer_bank_account_id: '',
+    payee_account_number: bankDetails?.account_number || '',
+    payee_ifsc_code: bankDetails?.ifsc_code || '',
+    payee_upi_id: bankDetails?.upi_id || '',
+    tds_amount: '0',
+    tds_section: '',
+    remarks: '',
+    payment_type: 'FULL',
+  });
+
+  const { data: paymentsData, isLoading: paymentsLoading } = useQuery({
+    queryKey: ['draft-payments', draft.id],
+    queryFn: () => api.get<ApiResponse<InvoicePayment[]> & { summary: PaymentSummary }>(`/api/drafts/${draft.id}/payments`),
+  });
+
+  const { data: accountsData } = useQuery({
+    queryKey: ['company-bank-accounts'],
+    queryFn: () => api.get<ApiResponse<CompanyBankAccount[]>>('/api/company/bank-accounts'),
+  });
+
+  const payments = paymentsData?.data || [];
+  const summary = paymentsData?.summary;
+  const accounts = accountsData?.data || [];
+
+  const recordPaymentMutation = useMutation({
+    mutationFn: (body: Record<string, unknown>) =>
+      api.post<ApiResponse<InvoicePayment>>(`/api/drafts/${draft.id}/payments`, body),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['draft-payments', draft.id] });
+      queryClient.invalidateQueries({ queryKey: ['drafts'] });
+      setShowPaymentForm(false);
+      setFormError(null);
+    },
+    onError: (err: Error) => setFormError(err.message),
+  });
+
+  const handleSubmitPayment = (e: React.FormEvent) => {
+    e.preventDefault();
+    setFormError(null);
+    const amount = parseFloat(form.payment_amount);
+    if (!form.payment_date || isNaN(amount) || amount <= 0) {
+      setFormError('Payment date and a positive amount are required.');
+      return;
+    }
+    const body: Record<string, unknown> = {
+      payment_date: form.payment_date,
+      payment_method: form.payment_method,
+      payment_amount: amount,
+      payment_reference: form.payment_reference || undefined,
+      payer_bank_account_id: form.payer_bank_account_id ? parseInt(form.payer_bank_account_id) : undefined,
+      payee_account_number: form.payee_account_number || undefined,
+      payee_ifsc_code: form.payee_ifsc_code || undefined,
+      payee_upi_id: form.payee_upi_id || undefined,
+      tds_amount: parseFloat(form.tds_amount) || 0,
+      tds_section: parseFloat(form.tds_amount) > 0 ? form.tds_section : undefined,
+      remarks: form.remarks || undefined,
+      payment_type: form.payment_type,
+    };
+    recordPaymentMutation.mutate(body);
+  };
+
+  const allBankNull = !bankDetails || !Object.values(bankDetails).some(Boolean);
+
+  return (
+    <div className="border-t border-gray-200 bg-white">
+      <div className="flex border-b border-gray-100">
+        <button
+          onClick={() => setDetailTab('bank')}
+          className={`px-5 py-3 text-sm font-medium border-b-2 transition-colors ${
+            detailTab === 'bank'
+              ? 'border-primary-600 text-primary-700'
+              : 'border-transparent text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          Vendor Bank Details
+        </button>
+        <button
+          onClick={() => setDetailTab('payments')}
+          className={`px-5 py-3 text-sm font-medium border-b-2 transition-colors ${
+            detailTab === 'payments'
+              ? 'border-primary-600 text-primary-700'
+              : 'border-transparent text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          Payment History
+          {summary && summary.payment_count > 0 && (
+            <span className="ml-2 px-1.5 py-0.5 text-xs rounded-full bg-blue-100 text-blue-700">{summary.payment_count}</span>
+          )}
+        </button>
+      </div>
+
+      {detailTab === 'bank' && (
+        <div className="p-5">
+          {allBankNull ? (
+            <div className="bg-yellow-50 border border-yellow-200 rounded-lg px-4 py-3 text-sm text-yellow-700">
+              No bank details found in this invoice PDF. The vendor&apos;s payment info was not extracted.
+            </div>
+          ) : (
+            <div className="grid grid-cols-3 gap-4">
+              <BankField label="Account Holder" value={bankDetails?.account_holder} />
+              <BankField label="Bank Name" value={bankDetails?.bank_name} />
+              <BankField label="Account Number" value={maskAccountNumber(bankDetails?.account_number)} raw={bankDetails?.account_number} />
+              <BankField label="IFSC Code" value={bankDetails?.ifsc_code} />
+              <BankField label="Branch" value={bankDetails?.branch} />
+              <BankField label="UPI ID" value={bankDetails?.upi_id} />
+            </div>
+          )}
+        </div>
+      )}
+
+      {detailTab === 'payments' && (
+        <div className="p-5">
+          {/* Summary bar */}
+          {summary && (
+            <div className="flex items-center gap-6 mb-4 p-3 bg-gray-50 rounded-lg text-sm">
+              <span className="text-gray-500">Invoice Total: <span className="font-semibold text-gray-800">&#8377;{summary.invoice_total.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span></span>
+              <span className="text-gray-500">Paid: <span className="font-semibold text-green-700">&#8377;{summary.total_paid.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span></span>
+              <span className="text-gray-500">Balance Due: <span className="font-semibold text-red-600">&#8377;{summary.balance_due.toLocaleString('en-IN', { minimumFractionDigits: 2 })}</span></span>
+              <span className={`px-2 py-0.5 rounded text-xs font-medium ml-auto ${
+                summary.payment_status === 'FULLY_PAID' ? 'bg-green-100 text-green-700' :
+                summary.payment_status === 'PARTIALLY_PAID' ? 'bg-yellow-100 text-yellow-700' :
+                'bg-gray-100 text-gray-600'
+              }`}>
+                {summary.payment_status || 'UNPAID'}
+              </span>
+              {!showPaymentForm && (
+                <button
+                  onClick={() => setShowPaymentForm(true)}
+                  className="px-3 py-1.5 text-xs bg-primary-600 text-white rounded-lg hover:bg-primary-700 font-medium"
+                >
+                  Record Payment
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* Payment history table */}
+          {paymentsLoading ? (
+            <p className="text-sm text-gray-400 py-4">Loading payments...</p>
+          ) : payments.length === 0 && !showPaymentForm ? (
+            <div className="text-center py-6">
+              <p className="text-sm text-gray-400 mb-3">No payments recorded yet.</p>
+              <button
+                onClick={() => setShowPaymentForm(true)}
+                className="px-4 py-2 text-sm bg-primary-600 text-white rounded-lg hover:bg-primary-700"
+              >
+                Record First Payment
+              </button>
+            </div>
+          ) : payments.length > 0 ? (
+            <div className="overflow-x-auto mb-4">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="bg-gray-50 text-gray-500 uppercase tracking-wide text-left">
+                    <th className="px-3 py-2">Date</th>
+                    <th className="px-3 py-2">Method</th>
+                    <th className="px-3 py-2">Reference</th>
+                    <th className="px-3 py-2">Amount</th>
+                    <th className="px-3 py-2">TDS</th>
+                    <th className="px-3 py-2">From Account</th>
+                    <th className="px-3 py-2">Status</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-50">
+                  {payments.map((p) => (
+                    <tr key={p.id} className="hover:bg-gray-50">
+                      <td className="px-3 py-2 text-gray-600">{p.payment_date}</td>
+                      <td className="px-3 py-2 font-medium text-gray-700">{p.payment_method}</td>
+                      <td className="px-3 py-2 font-mono text-gray-500">{p.payment_reference || p.cheque_number || '—'}</td>
+                      <td className="px-3 py-2 font-semibold text-gray-800">&#8377;{Number(p.payment_amount).toLocaleString('en-IN', { minimumFractionDigits: 2 })}</td>
+                      <td className="px-3 py-2 text-gray-500">{p.tds_amount && p.tds_amount > 0 ? `₹${p.tds_amount}` : '—'}</td>
+                      <td className="px-3 py-2 text-gray-500">{p.payer_bank_name ? `${p.payer_bank_name} ${p.payer_account_number_masked || ''}` : '—'}</td>
+                      <td className="px-3 py-2">
+                        <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${PAYMENT_STATUS_COLORS[p.payment_status] || 'bg-gray-100 text-gray-500'}`}>
+                          {p.payment_status}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+
+          {/* Record payment form */}
+          {showPaymentForm && (
+            <div className="border border-gray-200 rounded-xl p-5 bg-gray-50">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-sm font-semibold text-gray-800">Record Payment</h3>
+                <button onClick={() => setShowPaymentForm(false)} className="text-xs text-gray-400 hover:text-gray-600">Cancel</button>
+              </div>
+              <form onSubmit={handleSubmitPayment} className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Payment Date *</label>
+                  <input
+                    type="date"
+                    value={form.payment_date}
+                    onChange={(e) => setForm({ ...form, payment_date: e.target.value })}
+                    className="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-primary-400 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Payment Method *</label>
+                  <select
+                    value={form.payment_method}
+                    onChange={(e) => setForm({ ...form, payment_method: e.target.value })}
+                    className="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-primary-400 focus:outline-none"
+                  >
+                    {['NEFT', 'RTGS', 'IMPS', 'UPI', 'CHEQUE', 'DD', 'CASH'].map((m) => (
+                      <option key={m} value={m}>{m}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Amount (INR) *</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={form.payment_amount}
+                    onChange={(e) => setForm({ ...form, payment_amount: e.target.value })}
+                    className="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-primary-400 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">
+                    {PAYMENT_METHOD_LABELS[form.payment_method] || 'Reference'}
+                  </label>
+                  <input
+                    type="text"
+                    value={form.payment_reference}
+                    onChange={(e) => setForm({ ...form, payment_reference: e.target.value })}
+                    placeholder={form.payment_method === 'NEFT' || form.payment_method === 'RTGS' ? 'e.g. HDFC000123456' : ''}
+                    className="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-primary-400 focus:outline-none font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">From Account</label>
+                  <select
+                    value={form.payer_bank_account_id}
+                    onChange={(e) => setForm({ ...form, payer_bank_account_id: e.target.value })}
+                    className="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-primary-400 focus:outline-none"
+                  >
+                    <option value="">— Select account —</option>
+                    {accounts.map((a) => (
+                      <option key={a.id} value={a.id}>
+                        {a.account_alias} ({a.account_number_masked})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Payment Type</label>
+                  <select
+                    value={form.payment_type}
+                    onChange={(e) => setForm({ ...form, payment_type: e.target.value })}
+                    className="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-primary-400 focus:outline-none"
+                  >
+                    <option value="FULL">Full</option>
+                    <option value="PARTIAL">Partial</option>
+                    <option value="ADVANCE_ADJUSTMENT">Advance Adjustment</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Payee Account Number</label>
+                  <input
+                    type="text"
+                    value={form.payee_account_number}
+                    onChange={(e) => setForm({ ...form, payee_account_number: e.target.value })}
+                    className="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-primary-400 focus:outline-none font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Payee IFSC</label>
+                  <input
+                    type="text"
+                    value={form.payee_ifsc_code}
+                    onChange={(e) => setForm({ ...form, payee_ifsc_code: e.target.value.toUpperCase() })}
+                    className="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-primary-400 focus:outline-none font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">TDS Amount</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={form.tds_amount}
+                    onChange={(e) => setForm({ ...form, tds_amount: e.target.value })}
+                    className="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-primary-400 focus:outline-none"
+                  />
+                </div>
+                {parseFloat(form.tds_amount) > 0 && (
+                  <div>
+                    <label className="block text-xs font-medium text-gray-700 mb-1">TDS Section</label>
+                    <select
+                      value={form.tds_section}
+                      onChange={(e) => setForm({ ...form, tds_section: e.target.value })}
+                      className="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-primary-400 focus:outline-none"
+                    >
+                      <option value="">— Select section —</option>
+                      {TDS_SECTIONS.map((s) => (
+                        <option key={s} value={s}>{s}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+                <div className="col-span-2">
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Remarks</label>
+                  <textarea
+                    value={form.remarks}
+                    onChange={(e) => setForm({ ...form, remarks: e.target.value })}
+                    rows={2}
+                    className="w-full text-sm border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-primary-400 focus:outline-none resize-none"
+                  />
+                </div>
+
+                {formError && (
+                  <div className="col-span-2 bg-red-50 text-red-600 text-xs px-3 py-2 rounded-lg border border-red-200">
+                    {formError}
+                  </div>
+                )}
+
+                <div className="col-span-2 flex justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowPaymentForm(false)}
+                    className="px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={recordPaymentMutation.isPending}
+                    className="px-4 py-2 text-sm bg-primary-600 text-white rounded-lg hover:bg-primary-700 disabled:opacity-50"
+                  >
+                    {recordPaymentMutation.isPending ? 'Recording...' : 'Record Payment'}
+                  </button>
+                </div>
+              </form>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BankField({ label, value, raw }: { label: string; value?: string | null; raw?: string | null }) {
+  return (
+    <div>
+      <p className="text-xs text-gray-500 mb-0.5">{label}</p>
+      {value && value !== 'Not extracted' ? (
+        <p className="text-sm font-medium text-gray-800 font-mono">{value}</p>
+      ) : (
+        <p className="text-sm text-gray-400 italic">Not extracted</p>
+      )}
+    </div>
+  );
+}
+
 export default function InvoicesPage() {
   const gridRef = useRef<AgGridReact>(null);
   const queryClient = useQueryClient();
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
   const [activeTab, setActiveTab] = useState('all');
   const [selectedRows, setSelectedRows] = useState<InvoiceDraft[]>([]);
+  const [detailDraft, setDetailDraft] = useState<InvoiceDraft | null>(null);
 
   // State for validation block modal
   const [blockModal, setBlockModal] = useState<{
@@ -613,6 +1032,12 @@ export default function InvoicesPage() {
     const rows = gridRef.current?.api.getSelectedRows() || [];
     setSelectedRows(rows as InvoiceDraft[]);
     setSelectedIds(rows.map((r: InvoiceDraft) => r.id));
+    // Show detail panel when exactly one row is selected
+    if (rows.length === 1) {
+      setDetailDraft(rows[0] as InvoiceDraft);
+    } else {
+      setDetailDraft(null);
+    }
   }, []);
 
   const handleExport = () => {
@@ -753,7 +1178,7 @@ export default function InvoicesPage() {
 
       <SubTabs tabs={tabs} activeTab={activeTab} onChange={setActiveTab} />
 
-      <div className="ag-theme-alpine" style={{ height: 'calc(100vh - 260px)', width: '100%' }}>
+      <div className="ag-theme-alpine" style={{ height: detailDraft ? 'calc(100vh - 560px)' : 'calc(100vh - 260px)', width: '100%', minHeight: 200 }}>
         <AgGridReact
           ref={gridRef}
           rowData={filteredDrafts}
@@ -774,6 +1199,25 @@ export default function InvoicesPage() {
           }}
         />
       </div>
+
+      {/* Detail Panel — Bank & Payment */}
+      {detailDraft && (
+        <div className="mt-2 rounded-xl border border-gray-200 bg-white shadow-sm overflow-hidden" style={{ maxHeight: 340, overflowY: 'auto' }}>
+          <div className="flex items-center justify-between px-5 py-3 bg-gray-50 border-b border-gray-100">
+            <div className="text-sm font-semibold text-gray-700">
+              {detailDraft.vendor_name || 'Unknown Vendor'}{' '}
+              <span className="font-mono text-gray-400 text-xs ml-2">#{detailDraft.invoice_number || detailDraft.id}</span>
+            </div>
+            <button
+              onClick={() => { setDetailDraft(null); gridRef.current?.api.deselectAll(); }}
+              className="text-xs text-gray-400 hover:text-gray-600 px-2 py-1 rounded hover:bg-gray-100"
+            >
+              Close
+            </button>
+          </div>
+          <BankPaymentPanel draft={detailDraft} />
+        </div>
+      )}
 
       {/* Validation block modal */}
       {blockModal && (

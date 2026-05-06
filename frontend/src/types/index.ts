@@ -28,6 +28,15 @@ export interface PushResult {
   pipeline: PushPipeline;
 }
 
+export interface VendorBankDetails {
+  bank_name?: string | null;
+  account_number?: string | null;
+  ifsc_code?: string | null;
+  branch?: string | null;
+  account_holder?: string | null;
+  upi_id?: string | null;
+}
+
 export interface InvoiceDraft {
   id: number;
   invoice_id: number;
@@ -59,10 +68,61 @@ export interface InvoiceDraft {
   tds_applicable: boolean | null;
   place_of_supply: string | null;
   pdf_attached_at: string | null;
+  bank_details?: VendorBankDetails | null;
+  payment_status?: string | null;
+  amount_paid?: number | null;
+  amount_due?: number | null;
   // pipeline result from last push (null until first push attempt)
   last_pipeline: PushPipeline | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface CompanyBankAccount {
+  id: number;
+  bank_name: string;
+  account_number_masked: string;
+  ifsc_code: string;
+  account_type: string;
+  account_alias: string;
+  is_default: boolean;
+  is_active: boolean;
+  created_at: string | null;
+}
+
+export interface InvoicePayment {
+  id: number;
+  draft_id: number | null;
+  invoice_id: number;
+  payment_method: string;
+  payment_date: string;
+  payment_amount: number;
+  currency: string;
+  payment_reference?: string | null;
+  cheque_number?: string | null;
+  payer_bank_name?: string | null;
+  payer_account_number_masked?: string | null;
+  payee_account_number?: string | null;
+  payee_ifsc_code?: string | null;
+  payee_upi_id?: string | null;
+  tds_amount?: number;
+  tds_section?: string | null;
+  advance_adjusted?: number;
+  payment_status: string;
+  payment_type: string;
+  remarks?: string | null;
+  recorded_by_email: string;
+  recorded_by_name?: string | null;
+  recorded_at: string | null;
+  created_at: string | null;
+}
+
+export interface PaymentSummary {
+  invoice_total: number;
+  total_paid: number;
+  balance_due: number;
+  payment_status: string;
+  payment_count: number;
 }
 
 export interface LineItem {

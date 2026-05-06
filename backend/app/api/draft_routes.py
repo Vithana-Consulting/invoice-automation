@@ -816,6 +816,10 @@ def _draft_to_dict(draft) -> dict:
         "tds_applicable": draft.tds_applicable,
         "place_of_supply": draft.place_of_supply,
         "pdf_attached_at": str(draft.pdf_attached_at) if draft.pdf_attached_at else None,
+        "bank_details": json.loads(draft.bank_details_json) if draft.bank_details_json else None,
+        "payment_status": draft.payment_status,
+        "amount_paid": float(draft.amount_paid) if draft.amount_paid else 0.0,
+        "amount_due": float(draft.amount_due) if draft.amount_due else None,
         "created_at": str(draft.created_at) if draft.created_at else None,
         "updated_at": str(draft.updated_at) if draft.updated_at else None,
     }

@@ -19,6 +19,7 @@ from app.api.admin_routes import router as admin_router
 from app.api.settings_routes import router as settings_router
 from app.api.coa_routes import router as coa_router
 from app.api.bank_routes import router as bank_router
+from app.api.payment_routes import router as payment_router
 
 api_router = APIRouter()
 
@@ -37,3 +38,4 @@ api_router.include_router(dashboard_router, prefix="/api/dashboard", tags=["dash
 api_router.include_router(settings_router, prefix="/api/settings", tags=["settings"])
 api_router.include_router(coa_router, prefix="/api/coa", tags=["chart-of-accounts"])
 api_router.include_router(bank_router, prefix="/api/bank-details", tags=["bank-details"])
+api_router.include_router(payment_router, prefix="/api", tags=["payments"])

@@ -103,7 +103,7 @@ class DraftService:
         # Step 5: Auto-assign GL account based on type + HSN
         account_id = self._assign_account(invoice, invoice_type)
 
-        # Step 6: Create draft (carry validation warnings + tax breakup)
+        # Step 6: Create draft (carry validation warnings + tax breakup + bank details)
         validation_warnings = invoice.validation_errors if invoice.parsing_status == "WARNING" else None
         draft = self.draft_repo.create(
             invoice_id=invoice_id,
@@ -124,6 +124,8 @@ class DraftService:
             tax_breakup_json=invoice.tax_breakup_json,
             invoice_type=invoice_type,
             account_id=account_id,
+            bank_details_json=invoice.bank_details_json,
+            payment_status="UNPAID",
         )
 
         self.audit_repo.log(
@@ -176,6 +178,7 @@ class DraftService:
             validation_warnings=validation_warnings,
             validation_errors=None,   # cleared — next push re-runs pipeline
             push_error=None,
+            bank_details_json=invoice.bank_details_json,
         )
 
         self.audit_repo.log(

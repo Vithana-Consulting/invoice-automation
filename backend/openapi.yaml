@@ -1,0 +1,2395 @@
+openapi: 3.0.3
+info:
+  title: Vithana Accounting Automation Platform
+  description: |
+    Invoice Pipeline with Rule Builder — multi-tenant accounting automation for Zoho, Tally, and QuickBooks.
+
+    ## Authentication
+    - **Tenant routes** require a JWT `access_token` cookie (obtained via `/api/auth/google/callback`).
+    - **Admin routes** require the `x-admin-key` header.
+    - **Settings routes** require JWT.
+
+    ## Response envelope
+    All responses follow:
+    ```json
+    { "status": "success" | "error", "data": {}, "message": "..." }
+    ```
+  version: "0.2.0"
+  contact:
+    email: Deepak.sakthi@vithanaconsulting.com
+
+servers:
+  - url: http://localhost:8000
+    description: Local dev
+
+tags:
+  - name: Health
+  - name: Auth
+  - name: Ingest
+  - name: Drafts
+  - name: Rules
+  - name: Vendor Mappings
+  - name: Integrations
+  - name: Dashboard
+  - name: Settings
+  - name: COA
+  - name: Bank Details
+  - name: Admin
+
+# ---------------------------------------------------------------------------
+# Security schemes
+# ---------------------------------------------------------------------------
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: access_token
+    adminKey:
+      type: apiKey
+      in: header
+      name: x-admin-key
+
+  # ---------------------------------------------------------------------------
+  # Reusable schemas
+  # ---------------------------------------------------------------------------
+  schemas:
+    SuccessEnvelope:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [success]
+        data:
+          description: Payload — shape varies per endpoint
+
+    ErrorEnvelope:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [error]
+        message:
+          type: string
+        code:
+          type: string
+
+    PaginationMeta:
+      type: object
+      properties:
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+
+    # ---- Auth ----
+    Company:
+      type: object
+      properties:
+        slug: { type: string }
+        name: { type: string }
+        oauth_configured: { type: boolean }
+
+    UserProfile:
+      type: object
+      properties:
+        id: { type: integer }
+        email: { type: string }
+        name: { type: string }
+        picture_url: { type: string }
+        is_admin: { type: boolean }
+        companies:
+          type: array
+          items: { $ref: '#/components/schemas/UserCompany' }
+        active_company:
+          $ref: '#/components/schemas/UserCompany'
+          nullable: true
+
+    UserCompany:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        slug: { type: string }
+        domain: { type: string }
+        role: { type: string }
+
+    # ---- Draft ----
+    LineItem:
+      type: object
+      properties:
+        description: { type: string }
+        quantity: { type: number, nullable: true }
+        unit_price: { type: number, nullable: true }
+        amount: { type: number, nullable: true }
+        hsn_code: { type: string, nullable: true }
+        tax_rate: { type: number, nullable: true }
+
+    Draft:
+      type: object
+      properties:
+        id: { type: integer }
+        invoice_id: { type: integer }
+        vendor_name: { type: string }
+        resolved_vendor_name: { type: string }
+        invoice_number: { type: string }
+        invoice_date: { type: string, format: date, nullable: true }
+        due_date: { type: string, format: date, nullable: true }
+        total_amount: { type: number, nullable: true }
+        tax_amount: { type: number, nullable: true }
+        currency: { type: string }
+        line_items:
+          type: array
+          items: { $ref: '#/components/schemas/LineItem' }
+        source: { type: string, enum: [gmail, stripe, chargebee, manual_upload] }
+        push_to: { type: string, nullable: true }
+        push_to_rule_id: { type: integer, nullable: true }
+        status:
+          type: string
+          enum: [PENDING_REVIEW, PENDING_VENDOR, APPROVED, PUSHED, PUSH_FAILED, REJECTED]
+        reviewed_by: { type: integer, nullable: true }
+        reviewed_at: { type: string, format: date-time, nullable: true }
+        push_error: { type: string, nullable: true }
+        pushed_at: { type: string, format: date-time, nullable: true }
+        external_bill_id: { type: string, nullable: true }
+        validation_warnings:
+          type: array
+          items: { type: object }
+        validation_errors:
+          type: array
+          items: { type: object }
+        tax_breakup: { type: object, nullable: true }
+        invoice_type: { type: string }
+        account_id: { type: integer, nullable: true }
+        account_name: { type: string, nullable: true }
+        itc_status: { type: string }
+        tds_applicable: { type: boolean }
+        place_of_supply: { type: string }
+        created_at: { type: string, format: date-time, nullable: true }
+        updated_at: { type: string, format: date-time, nullable: true }
+
+    DraftUpdate:
+      type: object
+      properties:
+        vendor_name: { type: string }
+        resolved_vendor_name: { type: string }
+        invoice_number: { type: string }
+        invoice_date: { type: string, format: date }
+        due_date: { type: string, format: date }
+        total_amount: { type: number }
+        tax_amount: { type: number }
+        currency: { type: string }
+        push_to: { type: string }
+
+    PushOverrideBody:
+      type: object
+      properties:
+        override_reason_code:
+          type: string
+          enum:
+            - AMOUNT_VERIFIED_MANUALLY
+            - DUPLICATE_CONFIRMED_DIFFERENT
+            - GSTIN_CONFIRMED_VALID
+            - RCM_CONFIRMED_NOT_APPLICABLE
+            - ITC_CUTOFF_CONFIRMED_WITHIN_LIMIT
+            - GST_ROUTING_CONFIGURED_SEPARATELY
+            - OTHER
+        override_reason: { type: string }
+
+    ValidationBlock:
+      type: object
+      properties:
+        code: { type: string }
+        message: { type: string }
+        detail: { type: object }
+
+    # ---- Rule ----
+    RuleConditions:
+      type: object
+      description: Flexible condition object (vendor_name, amount_gt, amount_lt, source, currency, etc.)
+      additionalProperties: true
+
+    Rule:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        description: { type: string }
+        priority: { type: integer }
+        is_active: { type: boolean }
+        conditions: { $ref: '#/components/schemas/RuleConditions' }
+        action_type: { type: string }
+        action_value: { type: string }
+        created_at: { type: string, format: date-time, nullable: true }
+        updated_at: { type: string, format: date-time, nullable: true }
+
+    RuleCreate:
+      type: object
+      required: [name, conditions, action_type, action_value]
+      properties:
+        name: { type: string }
+        description: { type: string }
+        priority: { type: integer }
+        is_active: { type: boolean, default: true }
+        conditions: { $ref: '#/components/schemas/RuleConditions' }
+        action_type: { type: string }
+        action_value: { type: string }
+
+    RuleUpdate:
+      type: object
+      properties:
+        name: { type: string }
+        description: { type: string }
+        priority: { type: integer }
+        is_active: { type: boolean }
+        conditions: { $ref: '#/components/schemas/RuleConditions' }
+        action_type: { type: string }
+        action_value: { type: string }
+
+    # ---- Vendor Mapping ----
+    VendorMapping:
+      type: object
+      properties:
+        id: { type: integer }
+        alias_name: { type: string }
+        canonical_name: { type: string }
+        platform: { type: string }
+        platform_vendor_id: { type: string, nullable: true }
+        created_at: { type: string, format: date-time, nullable: true }
+        updated_at: { type: string, format: date-time, nullable: true }
+
+    VendorMappingCreate:
+      type: object
+      required: [alias_name, canonical_name, platform]
+      properties:
+        alias_name: { type: string, maxLength: 500 }
+        canonical_name: { type: string, maxLength: 500 }
+        platform: { type: string, maxLength: 50 }
+        platform_vendor_id: { type: string }
+
+    # ---- Integration ----
+    Integration:
+      type: object
+      properties:
+        id: { type: integer, nullable: true }
+        platform: { type: string }
+        display_name: { type: string }
+        description: { type: string }
+        category: { type: string }
+        is_enabled: { type: boolean }
+        is_configured: { type: boolean }
+        health_status: { type: string }
+        health_checked_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time, nullable: true }
+
+    IntegrationCreate:
+      type: object
+      required: [platform, config]
+      properties:
+        platform: { type: string }
+        display_name: { type: string }
+        config: { type: object }
+        is_enabled: { type: boolean, default: false }
+
+    # ---- COA ----
+    COAAccount:
+      type: object
+      properties:
+        id: { type: integer }
+        platform: { type: string }
+        platform_account_id: { type: string }
+        code: { type: string }
+        name: { type: string }
+        type: { type: string }
+        description: { type: string }
+        parent_platform_id: { type: string, nullable: true }
+        is_active: { type: boolean }
+        sub_type:
+          type: string
+          nullable: true
+          enum: [PURCHASE, SALE, TAX_CGST, TAX_SGST, TAX_IGST, TAX_CESS, null]
+        hsn_codes:
+          type: array
+          items: { type: string }
+        is_default: { type: boolean }
+        synced_at: { type: string, format: date-time, nullable: true }
+
+    # ---- Admin ----
+    AdminCompany:
+      type: object
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        slug: { type: string }
+        domain: { type: string }
+        is_active: { type: boolean }
+        oauth_configured: { type: boolean }
+        members:
+          type: array
+          items:
+            type: object
+            properties:
+              email: { type: string }
+              role: { type: string }
+        created_at: { type: string, format: date-time, nullable: true }
+
+    AuditEntry:
+      type: object
+      properties:
+        id: { type: integer }
+        entity_type: { type: string }
+        entity_id: { type: integer }
+        action: { type: string }
+        details: { type: object, nullable: true }
+        status: { type: string }
+        error: { type: string, nullable: true }
+        created_at: { type: string, format: date-time, nullable: true }
+
+# ===========================================================================
+# Paths
+# ===========================================================================
+paths:
+
+  # ---- Health ----
+  /health:
+    get:
+      tags: [Health]
+      summary: Health check
+      operationId: healthCheck
+      responses:
+        '200':
+          description: Service status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [healthy, degraded] }
+                  app: { type: string }
+                  database: { type: string, enum: [healthy, error] }
+                  parser_mode: { type: string }
+                  llm_provider: { type: string, nullable: true }
+                  llm_model: { type: string, nullable: true }
+                  timestamp: { type: string, format: date-time }
+
+  /config:
+    get:
+      tags: [Health]
+      summary: App runtime config (non-sensitive)
+      operationId: getConfig
+      responses:
+        '200':
+          description: Runtime config values
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  # ---- Auth ----
+  /api/auth/companies:
+    get:
+      tags: [Auth]
+      summary: List companies (for login selector)
+      operationId: listCompanies
+      parameters:
+        - in: query
+          name: q
+          schema: { type: string }
+          description: Search term
+      responses:
+        '200':
+          description: List of companies
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/Company' }
+
+  /api/auth/login-by-email:
+    post:
+      tags: [Auth]
+      summary: Initiate login by user email (auto-selects company)
+      operationId: loginByEmail
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+      responses:
+        '200':
+          description: Redirect URL for OAuth
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          redirect_url: { type: string }
+                          company: { type: string }
+
+  /api/auth/login:
+    post:
+      tags: [Auth]
+      summary: Initiate login by company slug
+      operationId: loginBySlug
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [company_slug]
+              properties:
+                company_slug: { type: string }
+      responses:
+        '200':
+          description: Redirect URL for OAuth
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  /api/auth/google/callback:
+    get:
+      tags: [Auth]
+      summary: Google OAuth callback — sets access_token cookie
+      operationId: googleCallback
+      parameters:
+        - in: query
+          name: code
+          required: true
+          schema: { type: string }
+        - in: query
+          name: state
+          required: true
+          schema: { type: string }
+      responses:
+        '302':
+          description: Redirect to frontend with auth cookie set
+
+  /api/auth/logout:
+    post:
+      tags: [Auth]
+      summary: Clear auth cookie
+      operationId: logout
+      responses:
+        '200':
+          description: Logged out
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  /api/auth/me:
+    get:
+      tags: [Auth]
+      summary: Current user profile
+      operationId: getMe
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: User profile
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/UserProfile' }
+        '401':
+          description: Not authenticated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+  # ---- Ingest ----
+  /api/ingest/preflight:
+    get:
+      tags: [Ingest]
+      summary: Preflight check (validate credentials before ingest)
+      operationId: ingestPreflight
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: Preflight result
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          success: { type: boolean }
+                          warnings: { type: array, items: { type: object } }
+                          errors:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                message: { type: string }
+
+  /api/ingest/{source}:
+    post:
+      tags: [Ingest]
+      summary: Run ingest pipeline from a source
+      operationId: runIngest
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: source
+          required: true
+          schema:
+            type: string
+            enum: [gmail, stripe, chargebee]
+      responses:
+        '200':
+          description: Ingest result
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          invoices_fetched: { type: integer }
+                          invoices_parsed: { type: integer }
+                          drafts_created: { type: integer }
+                          pipeline_warnings: { type: array, items: { type: object } }
+
+  /api/ingest/upload/file:
+    post:
+      tags: [Ingest]
+      summary: Upload a single invoice file (PDF, JPG, PNG, TIFF, BMP)
+      operationId: uploadInvoiceFile
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '200':
+          description: Upload result
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          invoice_id: { type: integer }
+                          parsed: { type: boolean }
+                          draft_id: { type: integer, nullable: true }
+                          duplicate: { type: boolean }
+
+  /api/ingest/reparse/{invoice_id}:
+    post:
+      tags: [Ingest]
+      summary: Reparse a single invoice
+      operationId: reparseInvoice
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: invoice_id
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Reparse result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  /api/ingest/reparse-all:
+    post:
+      tags: [Ingest]
+      summary: Reparse all invoices in batch
+      operationId: reparseAll
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 5000, default: 100 }
+      responses:
+        '200':
+          description: Batch reparse results
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          total: { type: integer }
+                          success: { type: integer }
+                          failed: { type: integer }
+                          results:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                invoice_id: { type: integer }
+                                file_name: { type: string }
+                                success: { type: boolean }
+                                vendor_name: { type: string, nullable: true }
+                                total_amount: { type: number, nullable: true }
+                                error: { type: string, nullable: true }
+
+  # ---- Drafts ----
+  /api/drafts:
+    get:
+      tags: [Drafts]
+      summary: List invoice drafts
+      operationId: listDrafts
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: query
+          name: status
+          schema:
+            type: string
+            enum: [PENDING_REVIEW, PENDING_VENDOR, APPROVED, PUSHED, PUSH_FAILED, REJECTED]
+        - in: query
+          name: push_to
+          schema: { type: string, enum: [zoho, tally, quickbooks] }
+        - in: query
+          name: source
+          schema: { type: string, enum: [gmail, stripe, chargebee, manual_upload] }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 500, default: 50 }
+        - in: query
+          name: offset
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        '200':
+          description: Paginated draft list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - $ref: '#/components/schemas/PaginationMeta'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/Draft' }
+
+  /api/drafts/export:
+    get:
+      tags: [Drafts]
+      summary: Export drafts to Excel
+      operationId: exportDrafts
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: query
+          name: status
+          schema: { type: string }
+        - in: query
+          name: push_to
+          schema: { type: string }
+        - in: query
+          name: source
+          schema: { type: string }
+      responses:
+        '200':
+          description: Excel file
+          content:
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema: { type: string, format: binary }
+
+  /api/drafts/bulk-approve:
+    post:
+      tags: [Drafts]
+      summary: Bulk approve drafts (max 500)
+      operationId: bulkApproveDrafts
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [draft_ids]
+              properties:
+                draft_ids:
+                  type: array
+                  items: { type: integer }
+                  maxItems: 500
+      responses:
+        '200':
+          description: Approval results
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  /api/drafts/bulk-push:
+    post:
+      tags: [Drafts]
+      summary: Bulk push drafts (max 500)
+      operationId: bulkPushDrafts
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [draft_ids]
+              properties:
+                draft_ids:
+                  type: array
+                  items: { type: integer }
+                  maxItems: 500
+      responses:
+        '200':
+          description: Push results
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            draft_id: { type: integer }
+                            success: { type: boolean }
+                            error: { type: string }
+                            external_bill_id: { type: string }
+                            validation_blocks:
+                              type: array
+                              items: { $ref: '#/components/schemas/ValidationBlock' }
+
+  /api/drafts/resolve-vendors:
+    post:
+      tags: [Drafts]
+      summary: Re-run vendor resolution on all pending drafts
+      operationId: resolveVendors
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: Resolution result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  /api/drafts/apply-rules:
+    post:
+      tags: [Drafts]
+      summary: Apply routing rules to drafts
+      operationId: applyRules
+      security:
+        - cookieAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                draft_ids:
+                  type: array
+                  items: { type: integer }
+                  description: If omitted, applies to all eligible drafts
+      responses:
+        '200':
+          description: Rule application results
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          matched: { type: integer }
+                          skipped: { type: integer }
+                          results:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                draft_id: { type: integer }
+                                vendor: { type: string }
+                                rule_name: { type: string }
+                                push_to: { type: string }
+
+  /api/drafts/{draft_id}:
+    get:
+      tags: [Drafts]
+      summary: Get a single draft
+      operationId: getDraft
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: draft_id
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Draft object
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data: { $ref: '#/components/schemas/Draft' }
+        '404':
+          description: Draft not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorEnvelope' }
+
+    put:
+      tags: [Drafts]
+      summary: Update a draft
+      operationId: updateDraft
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: draft_id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DraftUpdate' }
+      responses:
+        '200':
+          description: Updated draft
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  /api/drafts/{draft_id}/reparse:
+    post:
+      tags: [Drafts]
+      summary: Reparse a draft's source invoice
+      operationId: reparseDraft
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: draft_id
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Refreshed draft
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  /api/drafts/{draft_id}/approve:
+    post:
+      tags: [Drafts]
+      summary: Approve a draft
+      operationId: approveDraft
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: draft_id
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Approved draft
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  /api/drafts/{draft_id}/reject:
+    post:
+      tags: [Drafts]
+      summary: Reject a draft
+      operationId: rejectDraft
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: draft_id
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Rejected draft
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  /api/drafts/{draft_id}/push:
+    post:
+      tags: [Drafts]
+      summary: Push draft to accounting platform (Zoho / Tally / QuickBooks)
+      operationId: pushDraft
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: draft_id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PushOverrideBody' }
+      responses:
+        '200':
+          description: Pushed successfully
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          draft_id: { type: integer }
+                          external_bill_id: { type: string }
+                          platform: { type: string }
+        '422':
+          description: Validation blocks push
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    enum: [VALIDATION_BLOCKED, NON_OVERRIDABLE_BLOCK]
+                  blocks:
+                    type: array
+                    items: { $ref: '#/components/schemas/ValidationBlock' }
+                  hint: { type: string }
+
+  # ---- Rules ----
+  /api/rules:
+    get:
+      tags: [Rules]
+      summary: List routing rules
+      operationId: listRules
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: Rules list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/Rule' }
+
+    post:
+      tags: [Rules]
+      summary: Create a rule
+      operationId: createRule
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RuleCreate' }
+      responses:
+        '200':
+          description: Created rule
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  /api/rules/reorder:
+    put:
+      tags: [Rules]
+      summary: Reorder rules by priority
+      operationId: reorderRules
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [rule_ids]
+              properties:
+                rule_ids:
+                  type: array
+                  items: { type: integer }
+      responses:
+        '200':
+          description: Reordered rules
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  /api/rules/evaluate:
+    post:
+      tags: [Rules]
+      summary: Test rules against sample invoice fields
+      operationId: evaluateRule
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [invoice_fields]
+              properties:
+                invoice_fields:
+                  type: object
+                  properties:
+                    vendor_name: { type: string }
+                    resolved_vendor_name: { type: string }
+                    invoice_number: { type: string }
+                    total_amount: { type: number }
+                    tax_amount: { type: number }
+                    currency: { type: string }
+                    source: { type: string }
+                    invoice_date: { type: string }
+      responses:
+        '200':
+          description: Evaluation result
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          matched: { type: boolean }
+                          rule_id: { type: integer }
+                          rule_name: { type: string }
+                          action_type: { type: string }
+                          action_value: { type: string }
+
+  /api/rules/{rule_id}:
+    put:
+      tags: [Rules]
+      summary: Update a rule
+      operationId: updateRule
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: rule_id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RuleUpdate' }
+      responses:
+        '200':
+          description: Updated rule
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+    delete:
+      tags: [Rules]
+      summary: Delete a rule
+      operationId: deleteRule
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: rule_id
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Rule deleted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  /api/rules/{rule_id}/toggle:
+    post:
+      tags: [Rules]
+      summary: Toggle rule active/inactive
+      operationId: toggleRule
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: rule_id
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Toggled rule
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  /api/rules/{rule_id}/apply:
+    post:
+      tags: [Rules]
+      summary: Apply a specific rule to all eligible drafts
+      operationId: applyRule
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: rule_id
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Apply result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  # ---- Vendor Mappings ----
+  /api/vendor-mappings:
+    get:
+      tags: [Vendor Mappings]
+      summary: List vendor mappings
+      operationId: listVendorMappings
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: query
+          name: search
+          schema: { type: string }
+        - in: query
+          name: platform
+          schema: { type: string }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 500, default: 50 }
+        - in: query
+          name: offset
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        '200':
+          description: Vendor mappings
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - $ref: '#/components/schemas/PaginationMeta'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/VendorMapping' }
+
+    post:
+      tags: [Vendor Mappings]
+      summary: Create a vendor mapping
+      operationId: createVendorMapping
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/VendorMappingCreate' }
+      responses:
+        '200':
+          description: Created mapping
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      drafts_resolved: { type: integer }
+
+  /api/vendor-mappings/bulk:
+    post:
+      tags: [Vendor Mappings]
+      summary: Bulk create vendor mappings
+      operationId: bulkCreateVendorMappings
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items: { $ref: '#/components/schemas/VendorMappingCreate' }
+      responses:
+        '200':
+          description: Bulk result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  /api/vendor-mappings/source-vendors:
+    get:
+      tags: [Vendor Mappings]
+      summary: Vendor names from invoices with mapping status
+      operationId: getSourceVendors
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: Source vendor list
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  /api/vendor-mappings/platform-vendors/{platform}:
+    get:
+      tags: [Vendor Mappings]
+      summary: List platform vendor records
+      operationId: getPlatformVendors
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: platform
+          required: true
+          schema: { type: string }
+        - in: query
+          name: search
+          schema: { type: string }
+      responses:
+        '200':
+          description: Platform vendors
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  /api/vendor-mappings/platform-vendors/{platform}/sync:
+    post:
+      tags: [Vendor Mappings]
+      summary: Sync vendor list from platform
+      operationId: syncPlatformVendors
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: platform
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Sync result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  /api/vendor-mappings/platform-vendors/{platform}/{platform_vendor_id}:
+    delete:
+      tags: [Vendor Mappings]
+      summary: Remove a cached platform vendor
+      operationId: deletePlatformVendor
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: platform
+          required: true
+          schema: { type: string }
+        - in: path
+          name: platform_vendor_id
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Removed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  /api/vendor-mappings/link-vendor:
+    post:
+      tags: [Vendor Mappings]
+      summary: Link an invoice vendor alias to a platform vendor
+      operationId: linkVendor
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [alias_name, platform, platform_vendor_id, platform_vendor_name]
+              properties:
+                alias_name: { type: string }
+                platform: { type: string }
+                platform_vendor_id: { type: string }
+                platform_vendor_name: { type: string }
+      responses:
+        '200':
+          description: Link result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  /api/vendor-mappings/create-platform-vendor:
+    post:
+      tags: [Vendor Mappings]
+      summary: Create a vendor on the platform and map it
+      operationId: createPlatformVendor
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [vendor_name, platform]
+              properties:
+                vendor_name: { type: string }
+                canonical_name: { type: string }
+                platform: { type: string }
+      responses:
+        '200':
+          description: Created vendor + mapping
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  /api/vendor-mappings/{mapping_id}:
+    put:
+      tags: [Vendor Mappings]
+      summary: Update a vendor mapping
+      operationId: updateVendorMapping
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: mapping_id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                alias_name: { type: string }
+                canonical_name: { type: string }
+                platform: { type: string }
+                platform_vendor_id: { type: string }
+      responses:
+        '200':
+          description: Updated mapping
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+    delete:
+      tags: [Vendor Mappings]
+      summary: Delete a vendor mapping
+      operationId: deleteVendorMapping
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: mapping_id
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Deleted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  # ---- Integrations ----
+  /api/integrations/platforms:
+    get:
+      tags: [Integrations]
+      summary: List available platform definitions (catalog)
+      operationId: listPlatformDefinitions
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: Platform catalog
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  /api/integrations/platforms/{platform}:
+    get:
+      tags: [Integrations]
+      summary: Get a platform definition
+      operationId: getPlatformDefinition
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: platform
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Platform definition
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  /api/integrations:
+    get:
+      tags: [Integrations]
+      summary: List company integrations
+      operationId: listIntegrations
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: Integrations
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/Integration' }
+
+    post:
+      tags: [Integrations]
+      summary: Create an integration
+      operationId: createIntegration
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/IntegrationCreate' }
+      responses:
+        '200':
+          description: Created integration
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  /api/integrations/zoho/oauth/authorize:
+    get:
+      tags: [Integrations]
+      summary: Get Zoho OAuth authorize URL
+      operationId: zohoOAuthAuthorize
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: query
+          name: integration_id
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Authorize URL
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          authorize_url: { type: string }
+
+  /api/integrations/zoho/oauth/callback:
+    get:
+      tags: [Integrations]
+      summary: Zoho OAuth callback
+      operationId: zohoOAuthCallback
+      parameters:
+        - in: query
+          name: code
+          required: true
+          schema: { type: string }
+        - in: query
+          name: state
+          required: true
+          schema: { type: string }
+      responses:
+        '302':
+          description: Redirect to frontend
+
+  /api/integrations/{integration_id}:
+    get:
+      tags: [Integrations]
+      summary: Get integration (including masked config)
+      operationId: getIntegration
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: integration_id
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Integration detail
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+    put:
+      tags: [Integrations]
+      summary: Update an integration
+      operationId: updateIntegration
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: integration_id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                display_name: { type: string }
+                config: { type: object }
+                is_enabled: { type: boolean }
+      responses:
+        '200':
+          description: Updated integration
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+    delete:
+      tags: [Integrations]
+      summary: Remove an integration
+      operationId: deleteIntegration
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: integration_id
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Removed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  /api/integrations/{integration_id}/test:
+    post:
+      tags: [Integrations]
+      summary: Test integration connectivity
+      operationId: testIntegration
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: integration_id
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Health check result
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          healthy: { type: boolean }
+                          message: { type: string }
+                          details: { type: object }
+
+  /api/integrations/{integration_id}/toggle:
+    post:
+      tags: [Integrations]
+      summary: Toggle integration enabled/disabled
+      operationId: toggleIntegration
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: integration_id
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Toggled integration
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  # ---- Dashboard ----
+  /api/dashboard/summary:
+    get:
+      tags: [Dashboard]
+      summary: Summary counts for the dashboard
+      operationId: getDashboardSummary
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: Summary
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          total_invoices: { type: integer }
+                          total_drafts: { type: integer }
+                          draft_counts:
+                            type: object
+                            properties:
+                              PENDING_REVIEW: { type: integer }
+                              PENDING_VENDOR: { type: integer }
+                              APPROVED: { type: integer }
+                              PUSHED: { type: integer }
+                              PUSH_FAILED: { type: integer }
+                              REJECTED: { type: integer }
+                          by_source:
+                            type: object
+                            properties:
+                              gmail: { type: integer }
+                              stripe: { type: integer }
+                              chargebee: { type: integer }
+                              manual_upload: { type: integer }
+                          by_platform:
+                            type: object
+                            properties:
+                              zoho: { type: integer }
+                              tally: { type: integer }
+                              quickbooks: { type: integer }
+                              unassigned: { type: integer }
+
+  /api/dashboard/recent-activity:
+    get:
+      tags: [Dashboard]
+      summary: Recent audit log entries
+      operationId: getRecentActivity
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: Recent activity
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/AuditEntry' }
+
+  /api/dashboard/integration-health:
+    get:
+      tags: [Dashboard]
+      summary: Integration health status for the dashboard
+      operationId: getIntegrationHealth
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: Integration health
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  # ---- Settings ----
+  /api/settings:
+    get:
+      tags: [Settings]
+      summary: Get user + company settings
+      operationId: getSettings
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: Settings
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  /api/settings/company:
+    put:
+      tags: [Settings]
+      summary: Update company GST / PAN
+      operationId: updateCompanySettings
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                gst_number: { type: string }
+                pan_number: { type: string }
+      responses:
+        '200':
+          description: Updated settings
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  /api/settings/gmail-credentials:
+    post:
+      tags: [Settings]
+      summary: Upload Gmail OAuth credentials JSON
+      operationId: uploadGmailCredentials
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: credentials.json from Google Cloud Console
+      responses:
+        '200':
+          description: Upload result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+    delete:
+      tags: [Settings]
+      summary: Remove Gmail credentials
+      operationId: deleteGmailCredentials
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: Removed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  /api/settings/gmail-authorize:
+    get:
+      tags: [Settings]
+      summary: Start Gmail OAuth flow
+      operationId: gmailAuthorize
+      responses:
+        '302':
+          description: Redirect to Google consent screen
+
+  /api/settings/gmail-callback:
+    get:
+      tags: [Settings]
+      summary: Gmail OAuth callback
+      operationId: gmailCallback
+      parameters:
+        - in: query
+          name: code
+          required: true
+          schema: { type: string }
+      responses:
+        '302':
+          description: Redirect to frontend settings
+
+  /api/settings/runtime-config:
+    get:
+      tags: [Settings]
+      summary: Get runtime config overrides
+      operationId: getRuntimeConfig
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: Runtime config
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+    put:
+      tags: [Settings]
+      summary: Update runtime config overrides
+      operationId: updateRuntimeConfig
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Key-value map of config keys to override
+              additionalProperties: true
+      responses:
+        '200':
+          description: Update result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  /api/settings/runtime-config/{key}:
+    delete:
+      tags: [Settings]
+      summary: Reset a runtime config key to default
+      operationId: deleteRuntimeConfig
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: key
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Reset
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  # ---- COA ----
+  /api/coa:
+    get:
+      tags: [COA]
+      summary: List Chart of Accounts
+      operationId: listCOA
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: query
+          name: platform
+          schema: { type: string }
+        - in: query
+          name: type
+          schema: { type: string }
+        - in: query
+          name: sub_type
+          schema: { type: string }
+        - in: query
+          name: active_only
+          schema: { type: boolean }
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 500, default: 50 }
+        - in: query
+          name: offset
+          schema: { type: integer, minimum: 0, default: 0 }
+      responses:
+        '200':
+          description: Accounts
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - $ref: '#/components/schemas/PaginationMeta'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/COAAccount' }
+
+  /api/coa/sync/{platform}:
+    post:
+      tags: [COA]
+      summary: Sync Chart of Accounts from platform
+      operationId: syncCOA
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: platform
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Sync result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  /api/coa/auto-tag/{platform}:
+    post:
+      tags: [COA]
+      summary: Auto-tag accounts by keyword heuristics
+      operationId: autoTagCOA
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: platform
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Auto-tag result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  /api/coa/{account_id}:
+    put:
+      tags: [COA]
+      summary: Tag / configure a COA account
+      operationId: updateCOA
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: account_id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                sub_type:
+                  type: string
+                  enum: [PURCHASE, SALE, TAX_CGST, TAX_SGST, TAX_IGST, TAX_CESS]
+                hsn_codes:
+                  type: array
+                  items: { type: string }
+                is_default: { type: boolean }
+      responses:
+        '200':
+          description: Updated account
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+    delete:
+      tags: [COA]
+      summary: Deactivate a COA account
+      operationId: deleteCOA
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: path
+          name: account_id
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Deactivated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  # ---- Bank Details ----
+  /api/bank-details:
+    get:
+      tags: [Bank Details]
+      summary: List bank details extracted from invoices
+      operationId: listBankDetails
+      security:
+        - cookieAuth: []
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 5000, default: 100 }
+      responses:
+        '200':
+          description: Bank details
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      total: { type: integer }
+                      data:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            invoice_id: { type: integer }
+                            invoice_number: { type: string }
+                            vendor_name: { type: string }
+                            invoice_date: { type: string }
+                            bank_name: { type: string, nullable: true }
+                            account_number: { type: string, nullable: true }
+                            ifsc_code: { type: string, nullable: true }
+                            branch: { type: string, nullable: true }
+                            account_holder: { type: string, nullable: true }
+                            upi_id: { type: string, nullable: true }
+
+  /api/bank-details/export:
+    get:
+      tags: [Bank Details]
+      summary: Export bank details to Excel
+      operationId: exportBankDetails
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: Excel file
+          content:
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema: { type: string, format: binary }
+
+  # ---- Admin ----
+  /api/admin/login:
+    post:
+      tags: [Admin]
+      summary: Validate admin key
+      operationId: adminLogin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [admin_key]
+              properties:
+                admin_key: { type: string }
+      responses:
+        '200':
+          description: Authenticated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  /api/admin/companies:
+    get:
+      tags: [Admin]
+      summary: List all companies
+      operationId: adminListCompanies
+      security:
+        - adminKey: []
+      responses:
+        '200':
+          description: Companies
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/AdminCompany' }
+
+    post:
+      tags: [Admin]
+      summary: Create a company
+      operationId: adminCreateCompany
+      security:
+        - adminKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, domain]
+              properties:
+                name: { type: string }
+                domain: { type: string }
+      responses:
+        '200':
+          description: Created company
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  /api/admin/companies/{company_id}:
+    get:
+      tags: [Admin]
+      summary: Get a company
+      operationId: adminGetCompany
+      security:
+        - adminKey: []
+      parameters:
+        - in: path
+          name: company_id
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Company detail
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+    put:
+      tags: [Admin]
+      summary: Update a company
+      operationId: adminUpdateCompany
+      security:
+        - adminKey: []
+      parameters:
+        - in: path
+          name: company_id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string }
+                domain: { type: string }
+                gst_number: { type: string }
+                pan_number: { type: string }
+      responses:
+        '200':
+          description: Updated company
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+    delete:
+      tags: [Admin]
+      summary: Delete a company
+      operationId: adminDeleteCompany
+      security:
+        - adminKey: []
+      parameters:
+        - in: path
+          name: company_id
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Deleted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  /api/admin/companies/{company_id}/oauth:
+    put:
+      tags: [Admin]
+      summary: Configure company OAuth credentials
+      operationId: adminSetCompanyOAuth
+      security:
+        - adminKey: []
+      parameters:
+        - in: path
+          name: company_id
+          required: true
+          schema: { type: integer }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [client_id, client_secret]
+              properties:
+                client_id: { type: string }
+                client_secret: { type: string }
+                redirect_uri: { type: string }
+      responses:
+        '200':
+          description: OAuth configured
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+    get:
+      tags: [Admin]
+      summary: Get company OAuth config (masked)
+      operationId: adminGetCompanyOAuth
+      security:
+        - adminKey: []
+      parameters:
+        - in: path
+          name: company_id
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          description: OAuth config
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  /api/admin/companies/{company_id}/flush:
+    post:
+      tags: [Admin]
+      summary: Flush all data for a company (destructive)
+      operationId: adminFlushCompany
+      security:
+        - adminKey: []
+      parameters:
+        - in: path
+          name: company_id
+          required: true
+          schema: { type: integer }
+      responses:
+        '200':
+          description: Flush result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  /api/admin/flush:
+    post:
+      tags: [Admin]
+      summary: Flush all data across all companies (destructive)
+      operationId: adminFlushAll
+      security:
+        - adminKey: []
+      responses:
+        '200':
+          description: Flush result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  /api/admin/config:
+    get:
+      tags: [Admin]
+      summary: List all system config keys
+      operationId: adminGetConfig
+      security:
+        - adminKey: []
+      responses:
+        '200':
+          description: System config
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+    put:
+      tags: [Admin]
+      summary: Override system config keys
+      operationId: adminUpdateConfig
+      security:
+        - adminKey: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+      responses:
+        '200':
+          description: Update result
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+    delete:
+      tags: [Admin]
+      summary: Clear all config overrides
+      operationId: adminClearConfig
+      security:
+        - adminKey: []
+      responses:
+        '200':
+          description: Cleared
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }
+
+  /api/admin/config/{key}:
+    delete:
+      tags: [Admin]
+      summary: Revert a single config key to .env value
+      operationId: adminDeleteConfigKey
+      security:
+        - adminKey: []
+      parameters:
+        - in: path
+          name: key
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Reverted
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuccessEnvelope' }

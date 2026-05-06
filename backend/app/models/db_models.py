@@ -14,6 +14,7 @@ from datetime import datetime
 from sqlalchemy import (
     Boolean,
     Column,
+    Date,
     DateTime,
     ForeignKey,
     Index,
@@ -303,6 +304,12 @@ class InvoiceDraft(Base):
     tds_applicable = Column(Boolean, nullable=True)      # manual checkbox
     pdf_attached_at = Column(DateTime, nullable=True)
 
+    # Bank & payment fields
+    bank_details_json = Column(Text, nullable=True)      # vendor bank details from invoice PDF
+    payment_status = Column(String(20), nullable=True)   # UNPAID/PARTIALLY_PAID/FULLY_PAID
+    amount_paid = Column(Numeric(15, 2), nullable=True, default=0)
+    amount_due = Column(Numeric(15, 2), nullable=True)
+
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -310,6 +317,7 @@ class InvoiceDraft(Base):
     matched_rule = relationship("Rule", foreign_keys=[push_to_rule_id])
     reviewer = relationship("User", foreign_keys=[reviewed_by])
     account = relationship("ChartOfAccount", foreign_keys=[account_id])
+    payments = relationship("InvoicePayment", back_populates="draft", foreign_keys="InvoicePayment.draft_id")
 
 
 class ChartOfAccount(Base):
@@ -449,3 +457,72 @@ class SecretRotationLog(Base):
     grace_expires_at     = Column(DateTime, nullable=True)
     notes                = Column(Text, nullable=True)
     # NOTE: no updated_at — insert-only audit record
+
+
+class CompanyBankAccount(Base):
+    """Entvin's own bank accounts — the 'FROM' accounts when paying vendors."""
+    __tablename__ = "company_bank_accounts"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    bank_name = Column(String(100), nullable=False)
+    account_number = Column(String(30), nullable=False)
+    account_number_masked = Column(String(20), nullable=False)   # e.g. "XXXX 4521"
+    ifsc_code = Column(String(15), nullable=False)
+    account_type = Column(String(20), nullable=False, default="CURRENT")  # CURRENT/SAVINGS/OVERDRAFT
+    account_alias = Column(String(50), nullable=False)           # e.g. "HDFC Ops Account"
+    is_default = Column(Boolean, default=False)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    payments = relationship("InvoicePayment", back_populates="payer_bank_account")
+
+
+class InvoicePayment(Base):
+    """Records a payment made against an invoice draft."""
+    __tablename__ = "invoice_payments"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    invoice_id = Column(Integer, ForeignKey("invoices.id"), nullable=False, index=True)
+    draft_id = Column(Integer, ForeignKey("invoice_drafts.id"), nullable=True, index=True)
+
+    payment_method = Column(String(20), nullable=False)   # NEFT/RTGS/IMPS/UPI/CHEQUE/DD/CASH
+    payment_date = Column(Date, nullable=False)
+    payment_amount = Column(Numeric(15, 2), nullable=False)
+    currency = Column(String(5), default="INR")
+    payment_reference = Column(String(100), nullable=True)   # UTR for NEFT/RTGS, UPI txn ID
+    cheque_number = Column(String(20), nullable=True)
+    cheque_date = Column(Date, nullable=True)
+    cheque_clearing_date = Column(Date, nullable=True)
+
+    # Payer (Entvin) side
+    payer_bank_account_id = Column(Integer, ForeignKey("company_bank_accounts.id"), nullable=True)
+    payer_bank_name = Column(String(100), nullable=True)
+    payer_account_number_masked = Column(String(30), nullable=True)
+
+    # Payee (Vendor) side
+    payee_account_number = Column(String(30), nullable=True)
+    payee_ifsc_code = Column(String(15), nullable=True)
+    payee_upi_id = Column(String(100), nullable=True)
+
+    # Amounts
+    invoice_total_amount = Column(Numeric(15, 2), nullable=False)
+    tds_amount = Column(Numeric(15, 2), default=0)
+    tds_section = Column(String(20), nullable=True)
+    advance_adjusted = Column(Numeric(15, 2), default=0)
+    advance_reference = Column(String(100), nullable=True)
+
+    payment_status = Column(String(20), default="INITIATED")   # INITIATED/PENDING_CLEARANCE/CLEARED/BOUNCED/CANCELLED
+    payment_type = Column(String(30), default="FULL")          # FULL/PARTIAL/ADVANCE_ADJUSTMENT
+
+    remarks = Column(Text, nullable=True)
+    recorded_by_email = Column(String(255), nullable=False)
+    recorded_by_name = Column(String(255), nullable=True)
+    recorded_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    draft = relationship("InvoiceDraft", back_populates="payments", foreign_keys=[draft_id])
+    payer_bank_account = relationship("CompanyBankAccount", back_populates="payments")
