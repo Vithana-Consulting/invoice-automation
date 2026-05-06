@@ -321,9 +321,16 @@ class TesseractParser(InvoiceParser):
         sub_raw = _first_match(text, SUBTOTAL_PATTERNS)
         subtotal = _parse_amount(sub_raw) if sub_raw else None
 
-        # Identifiers
-        gst_match = GST_PATTERN.search(text)
-        gst_number = gst_match.group(1) if gst_match else None
+        # Identifiers — find all GSTINs; first = vendor (seller), second = buyer
+        all_gstins = GST_PATTERN.findall(text)
+        gst_number = all_gstins[0] if all_gstins else None
+        # For purchase invoices the buyer GSTIN is the second distinct GSTIN found
+        buyer_gst_number = None
+        seen = {gst_number} if gst_number else set()
+        for g in all_gstins[1:]:
+            if g not in seen:
+                buyer_gst_number = g
+                break
 
         pan_match = PAN_PATTERN.search(text)
         pan_number = pan_match.group(1) if pan_match else None
@@ -365,10 +372,11 @@ class TesseractParser(InvoiceParser):
             subtotal=subtotal,
             line_items=line_items,
             gst_number=gst_number,
+            buyer_gst_number=buyer_gst_number,
             pan_number=pan_number,
             uan_number=uan_number,
             currency=currency,
-            raw_text=text[:50000],  # Cap raw text at 50k chars
+            raw_text=text[:50000],
             parser_mode="tesseract",
             confidence_scores=confidence,
         )

@@ -20,6 +20,13 @@ COMPANY_SUFFIXES = re.compile(
     re.IGNORECASE,
 )
 
+# Strong legal entity endings only — used to find where a company name definitively ends
+# (excludes ambiguous words like "Technologies" that are mid-name, not end-of-name)
+COMPANY_ENTITY_ENDINGS = re.compile(
+    r"\b(?:Pvt\.?\s*Ltd\.?|Private\s+Limited|Limited|LLC|LLP|Inc\.?|Corp\.?|Corporation)\b",
+    re.IGNORECASE,
+)
+
 # -- Negative filters: lines that should NEVER be vendor names --
 VENDOR_NEGATIVE_KEYWORDS = {
     "nagar", "road", "street", "floor", "pin code", "pin:", "state",
@@ -93,63 +100,144 @@ def _clean_vendor(name: str) -> str:
     return name
 
 
-def extract_vendor_name(text: str) -> Optional[str]:
-    """Extract vendor name using multiple strategies, ordered by confidence.
+def _first_company_in_line(line: str) -> Optional[str]:
+    """Extract the FIRST company name from a line that may contain multiple.
 
-    Strategy 1: Explicit labels (From:, Vendor:, Invoice issued by:)
-    Strategy 2: Company suffix detection (Pvt Ltd, LLC, etc.)
-    Strategy 3: GSTIN-holder heuristic (line before/after GSTIN)
-    Strategy 4: None (prefer no vendor over wrong vendor)
+    Uses strong legal-entity endings (Private Limited, Ltd, LLP, etc.) to find
+    where the first company name ends, ignoring weaker words like "Technologies"
+    that appear mid-name.
+
+    Handles OCR-merged two-column lines like:
+      "Kodo Technologies Private Limited Entvin Labs Private Limited"
+    → returns "Kodo Technologies Private Limited"
     """
-    # Pre-clean markdown from text for pattern matching
+    # Prefer strong entity endings (Private Limited, Ltd, LLP…)
+    m = COMPANY_ENTITY_ENDINGS.search(line)
+    if not m:
+        # Fall back to any company suffix if no strong ending found
+        m = COMPANY_SUFFIXES.search(line)
+    if not m:
+        return None
+    candidate = line[:m.end()].strip()
+    # Strip any leading label like "FROM " or "GSTIN - "
+    candidate = re.sub(r"^(?:FROM|TO|GSTIN\s*[-:\s]*\S+)\s*", "", candidate, flags=re.IGNORECASE).strip()
+    return candidate if candidate else None
+
+
+def extract_vendor_name(text: str) -> Optional[str]:
+    """Extract the VENDOR (seller/issuer) name from a purchase invoice.
+
+    Strategies are ordered by confidence for Indian purchase invoice layouts:
+
+    S0 — FROM/TO two-column (Kodo style):
+         "FROM TO" header → next line has both names concatenated by OCR →
+         take text up to first company-suffix match (left = FROM = vendor).
+
+    S1 — Bill To boundary (Zoho/Freshbooks style):
+         Restrict search to text BEFORE "Bill To" marker (everything after is buyer).
+         Within that section use first-line letterhead heuristic then suffix scan.
+
+    S2 — Explicit seller labels (Invoice issued by:, Sold by:, etc.)
+
+    S3 — Company suffix scan with buyer-name exclusion.
+
+    S4 — GSTIN-holder heuristic (skips known buyer GSTIN).
+
+    S5 — None (prefer no vendor over a wrong one).
+    """
+    # Known buyer identifiers — lines containing these are the RECIPIENT, not the vendor
+    BUYER_KEYWORDS = {"entvin labs", "29aahce1996r1zl"}
+
+    def _is_buyer_line(line: str) -> bool:
+        lower = line.lower()
+        return any(kw in lower for kw in BUYER_KEYWORDS)
+
+    # Pre-clean markdown
     clean_text = re.sub(r"^#+\s*", "", text, flags=re.MULTILINE)
 
-    # Strategy 1: Labeled vendor
+    # ── Strategy 0: FROM/TO two-column layout ────────────────────────────────
+    # Kodo-style invoices have "FROM TO" as a header, then both company names
+    # on the SAME line because OCR flattens the two-column table.
+    from_to_m = re.search(r"\bFROM\s+TO\b", clean_text, re.IGNORECASE)
+    if from_to_m:
+        rest = clean_text[from_to_m.end():]
+        for line in rest.split("\n"):
+            line = line.strip()
+            if not line or not COMPANY_SUFFIXES.search(line):
+                continue
+            candidate = _first_company_in_line(line)
+            if candidate and not _is_bad_vendor_line(candidate) and not _is_buyer_line(candidate):
+                return _clean_vendor(candidate)[:200]
+            break  # Only check the first non-blank line after FROM/TO header
+
+    # ── Strategy 1: Bill To boundary ─────────────────────────────────────────
+    # Zoho/Freshbooks invoices have seller block at top, then "Bill To" section.
+    # Everything AFTER "Bill To" is buyer — restrict search to the header block.
+    bill_to_m = re.search(r"\bBill(?:ed)?\s+To\b", clean_text, re.IGNORECASE)
+    search_text = clean_text[:bill_to_m.start()] if bill_to_m else clean_text
+
+    if bill_to_m:
+        # First-line letterhead: for Zoho-style PDFs, line 1 is the seller entity name
+        # followed by "TAX INVOICE" or similar on the same line.
+        top_lines = [l.strip() for l in search_text.split("\n") if l.strip()]
+        for line in top_lines[:5]:
+            # Strip trailing document-type keywords
+            clean = re.sub(
+                r"\s*(?:TAX\s+INVOICE|INVOICE|CREDIT\s+NOTE|DEBIT\s+NOTE|RECEIPT|PROFORMA)\s*$",
+                "", line, flags=re.IGNORECASE,
+            ).strip()
+            if COMPANY_SUFFIXES.search(clean) and not _is_bad_vendor_line(clean) and not _is_buyer_line(clean):
+                return _clean_vendor(clean)[:200]
+
+    # ── Strategy 2: Explicit seller labels ───────────────────────────────────
     for pat in VENDOR_EXTRACT_PATTERNS:
-        m = pat.search(clean_text)
+        m = pat.search(search_text)
         if m:
             candidate = _clean_vendor(m.group(1).strip())
-            if not _is_bad_vendor_line(candidate):
+            if not _is_bad_vendor_line(candidate) and not _is_buyer_line(candidate):
                 return candidate[:200]
 
-    # Strategy 2: Company suffix — find lines containing known business entity types
-    lines = [l.strip() for l in clean_text.split("\n") if l.strip()]
+    # ── Strategy 3: Company suffix scan (buyer-aware) ─────────────────────────
+    lines = [l.strip() for l in search_text.split("\n") if l.strip()]
     for line in lines:
-        if COMPANY_SUFFIXES.search(line) and not _is_bad_vendor_line(line):
-            cleaned = _clean_vendor(line)
-            if ":" in cleaned:
-                parts = cleaned.split(":", 1)
-                if COMPANY_SUFFIXES.search(parts[1]):
-                    cleaned = parts[1].strip()
-                elif COMPANY_SUFFIXES.search(parts[0]):
-                    cleaned = parts[0].strip()
-            return _clean_vendor(cleaned)[:200]
+        if not COMPANY_SUFFIXES.search(line):
+            continue
+        if _is_bad_vendor_line(line) or _is_buyer_line(line):
+            continue
+        # If a single line contains multiple company names (two-column OCR merge),
+        # extract only the first one.
+        candidate = _first_company_in_line(line)
+        if not candidate:
+            candidate = line
+        cleaned = _clean_vendor(candidate)
+        if ":" in cleaned:
+            parts = cleaned.split(":", 1)
+            cleaned = parts[1].strip() if COMPANY_SUFFIXES.search(parts[1]) else parts[0].strip()
+        result = _clean_vendor(cleaned)
+        if result and not _is_bad_vendor_line(result) and not _is_buyer_line(result):
+            return result[:200]
 
-    # Strategy 3: CIN/GSTIN-holder — look for CIN or GSTIN and work backwards
+    # ── Strategy 4: GSTIN-holder heuristic (skip buyer GSTIN) ────────────────
     CIN_PATTERN = re.compile(r"\bCIN\s*[:\s]*[A-Z]\d{5}[A-Z]{2}\d{4}[A-Z]{3}\d{6}", re.IGNORECASE)
-    for i, line in enumerate(lines):
-        if GST_PATTERN.search(line) or CIN_PATTERN.search(line):
-            # Walk backwards to find the vendor name (skip label lines, addresses)
-            for j in range(i - 1, max(i - 5, -1), -1):
-                candidate = lines[j].strip()
-                if not candidate or _is_bad_vendor_line(candidate):
-                    continue
-                if GST_PATTERN.search(candidate) or CIN_PATTERN.search(candidate):
-                    continue
-                if re.match(r"^(GSTIN|GST|PAN|CIN|TAN|Phone|Email|Fax)\s*", candidate, re.IGNORECASE):
-                    continue
-                # Skip address-like lines (contain numbers followed by comma)
-                if re.match(r"^\d+.*,", candidate):
-                    continue
-                return _clean_vendor(candidate)[:200]
-            # Check if GSTIN line has vendor name before the number
-            before_gst = GST_PATTERN.split(line)[0].strip()
-            if before_gst and len(before_gst) > 5 and not _is_bad_vendor_line(before_gst):
-                before_gst = re.sub(r"^(?:GSTIN|GST)\s*[:\s]*", "", before_gst, flags=re.IGNORECASE).strip()
-                if before_gst:
-                    return _clean_vendor(before_gst)[:200]
+    all_lines = [l.strip() for l in clean_text.split("\n") if l.strip()]
+    for i, line in enumerate(all_lines):
+        if _is_buyer_line(line):
+            continue
+        if not (GST_PATTERN.search(line) or CIN_PATTERN.search(line)):
+            continue
+        for j in range(i - 1, max(i - 5, -1), -1):
+            candidate = all_lines[j].strip()
+            if not candidate or _is_bad_vendor_line(candidate) or _is_buyer_line(candidate):
+                continue
+            if GST_PATTERN.search(candidate) or CIN_PATTERN.search(candidate):
+                continue
+            if re.match(r"^(GSTIN|GST|PAN|CIN|TAN|Phone|Email|Fax)\s*", candidate, re.IGNORECASE):
+                continue
+            if re.match(r"^\d+.*,", candidate):
+                continue
+            return _clean_vendor(candidate)[:200]
 
-    # Strategy 4: Return None — better to have no vendor than wrong vendor
+    # ── Strategy 5: Give up ───────────────────────────────────────────────────
     logger.warning("Could not extract vendor name from text")
     return None
 
