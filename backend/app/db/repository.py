@@ -25,6 +25,7 @@ from app.models.db_models import (
     InvoiceRecord,
     Integration,
     LegacyAuditLog,
+    PlatformTdsTax,
     PlatformVendor,
     ProcessedEmail,
     Rule,
@@ -439,6 +440,110 @@ class PlatformVendorRepository(TenantBaseRepository):
             .first()
         )
         return record.synced_at if record else None
+
+
+class PlatformTdsTaxRepository(TenantBaseRepository):
+    """TDS tax masters synced from billing platforms (Zoho, QuickBooks)."""
+    model = PlatformTdsTax
+
+    def get_by_platform_tax_id(self, platform: str, platform_tax_id: str):
+        return (
+            self._base_query()
+            .filter(PlatformTdsTax.platform == platform)
+            .filter(PlatformTdsTax.platform_tax_id == platform_tax_id)
+            .first()
+        )
+
+    def list_by_platform(self, platform: str, active_only: bool = True) -> list:
+        q = self._base_query().filter(PlatformTdsTax.platform == platform)
+        if active_only:
+            q = q.filter(PlatformTdsTax.is_active.is_(True))
+        return q.order_by(PlatformTdsTax.section, PlatformTdsTax.rate).all()
+
+    def find_by_section_rate(self, platform: str, section: str, rate):
+        """Resolve a COA's tds_section + tds_rate to a platform tax id."""
+        if not section or rate is None:
+            return None
+        return (
+            self._base_query()
+            .filter(PlatformTdsTax.platform == platform)
+            .filter(PlatformTdsTax.section == section.upper())
+            .filter(PlatformTdsTax.rate == rate)
+            .filter(PlatformTdsTax.is_active.is_(True))
+            .first()
+        )
+
+    def upsert(self, platform: str, platform_tax_id: str, tax_name: str,
+               section: Optional[str] = None, rate=None, tax_type: str = "tds",
+               is_active: bool = True, raw_data: Optional[str] = None):
+        existing = self.get_by_platform_tax_id(platform, platform_tax_id)
+        if existing:
+            existing.tax_name = tax_name
+            existing.section = section.upper() if section else None
+            existing.rate = rate
+            existing.tax_type = tax_type
+            existing.is_active = is_active
+            if raw_data is not None:
+                existing.raw_data = raw_data
+            existing.synced_at = datetime.utcnow()
+            existing.updated_at = datetime.utcnow()
+            self.db.commit()
+            self.db.refresh(existing)
+            return existing, False
+
+        record = PlatformTdsTax(
+            platform=platform,
+            platform_tax_id=platform_tax_id,
+            tax_name=tax_name,
+            section=section.upper() if section else None,
+            rate=rate,
+            tax_type=tax_type,
+            is_active=is_active,
+            raw_data=raw_data,
+            synced_at=datetime.utcnow(),
+        )
+        return self._create(record), True
+
+    def sync_from_platform(self, platform: str, taxes: list[dict]) -> dict:
+        created = updated = 0
+        seen_ids: set[str] = set()
+        for t in taxes:
+            tax_id = str(t.get("id") or "")
+            if not tax_id:
+                continue
+            seen_ids.add(tax_id)
+            _, is_new = self.upsert(
+                platform=platform,
+                platform_tax_id=tax_id,
+                tax_name=t.get("name") or "",
+                section=t.get("section"),
+                rate=t.get("rate"),
+                tax_type=t.get("tax_type") or "tds",
+                is_active=bool(t.get("is_active", True)),
+                raw_data=json.dumps(t.get("raw") or {}),
+            )
+            if is_new:
+                created += 1
+            else:
+                updated += 1
+
+        # Mark stale rows inactive
+        stale = (
+            self._base_query()
+            .filter(PlatformTdsTax.platform == platform)
+            .filter(PlatformTdsTax.is_active.is_(True))
+            .all()
+        )
+        deactivated = 0
+        for row in stale:
+            if row.platform_tax_id not in seen_ids:
+                row.is_active = False
+                row.updated_at = datetime.utcnow()
+                deactivated += 1
+        if deactivated:
+            self.db.commit()
+
+        return {"total": len(seen_ids), "created": created, "updated": updated, "deactivated": deactivated}
 
 
 class ChartOfAccountRepository(TenantBaseRepository):

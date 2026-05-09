@@ -13,7 +13,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from app.db.repository import ChartOfAccountRepository
+from app.db.repository import ChartOfAccountRepository, PlatformTdsTaxRepository
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +28,12 @@ class ResolvedAccounts:
     cgst_amount: float = 0
     sgst_amount: float = 0
     igst_amount: float = 0
+    # TDS — bill-level. Resolved from draft.account → COA(tds_section, tds_rate)
+    # → platform_tds_taxes.platform_tax_id. Zoho computes the withhold amount
+    # itself when tds_tax_id is set on the bill.
+    tds_tax_id: Optional[str] = None
+    tds_section: Optional[str] = None
+    tds_rate: Optional[float] = None
     # Per-line-item: hsn_code → platform_account_id
     hsn_account_map: dict = None
 
@@ -116,5 +122,34 @@ def resolve_accounts_for_platform(draft, platform: str, db: Session) -> Resolved
         acc = coa_repo.get_default("TAX_IGST", platform)
         if acc:
             result.igst_account_ref = acc.platform_account_id
+
+    # 4. TDS — pulled from the draft's account (COA). Section + rate drive
+    # the lookup against synced platform_tds_taxes; an explicit override on
+    # the COA (tds_tax_id) wins. Silently skipped if any link is missing.
+    coa = getattr(draft, "account", None)
+    if coa and coa.platform == platform and (coa.tds_section or coa.tds_rate is not None or coa.tds_tax_id):
+        result.tds_section = coa.tds_section
+        try:
+            result.tds_rate = float(coa.tds_rate) if coa.tds_rate is not None else None
+        except (TypeError, ValueError):
+            result.tds_rate = None
+
+        if coa.tds_tax_id:
+            result.tds_tax_id = coa.tds_tax_id
+        elif coa.tds_section and result.tds_rate is not None:
+            tds_repo = PlatformTdsTaxRepository(db)
+            match = tds_repo.find_by_section_rate(platform, coa.tds_section, coa.tds_rate)
+            if match:
+                result.tds_tax_id = match.platform_tax_id
+                logger.info(
+                    "[TDS] Resolved %s @ %s%% → tax_id=%s (account=%s)",
+                    coa.tds_section, result.tds_rate, match.platform_tax_id, coa.name,
+                )
+            else:
+                logger.warning(
+                    "[TDS] No platform_tds_taxes match for %s @ %s%% on platform=%s. "
+                    "Run 'Sync TDS' on Chart of Accounts page.",
+                    coa.tds_section, result.tds_rate, platform,
+                )
 
     return result

@@ -26,6 +26,7 @@ VALID_OVERRIDE_REASON_CODES = {
     "AMOUNT_VERIFIED_MANUALLY",
     "DUPLICATE_CONFIRMED_DIFFERENT",
     "GSTIN_CONFIRMED_VALID",
+    "GSTIN_PAN_VERIFIED_MANUALLY",
     "RCM_CONFIRMED_NOT_APPLICABLE",
     "ITC_CUTOFF_CONFIRMED_WITHIN_LIMIT",
     "GST_ROUTING_CONFIGURED_SEPARATELY",
@@ -85,17 +86,30 @@ def get_draft(draft_id: int, db: Session = Depends(get_db)):
 
 @router.put("/{draft_id}")
 def update_draft(draft_id: int, body: dict, db: Session = Depends(get_db)):
-    """Update draft fields (vendor_name, amount, push_to, etc.)."""
+    """Update draft fields. Locked when status is PUSHED.
+
+    See draft grid in the UI: any field listed here must be reflected in the
+    column's `editable` callback so the lock-on-push contract holds.
+    """
     repo = DraftRepository(db)
+    draft = repo.get_by_id(draft_id)
+    if not draft:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    if draft.status == "PUSHED":
+        raise HTTPException(status_code=409, detail="Draft is locked once pushed.")
+
     allowed_fields = {
         "vendor_name", "resolved_vendor_name", "invoice_number",
         "invoice_date", "due_date", "total_amount", "tax_amount",
         "currency", "push_to",
+        # Newly-editable in the grid:
+        "invoice_type", "place_of_supply", "itc_status",
+        "account_id",
     }
     updates = {k: v for k, v in body.items() if k in allowed_fields}
+    if not updates:
+        return {"status": "success", "data": _draft_to_dict(draft)}
     draft = repo.update(draft_id, **updates)
-    if not draft:
-        raise HTTPException(status_code=404, detail="Draft not found")
     return {"status": "success", "data": _draft_to_dict(draft)}
 
 
@@ -514,6 +528,77 @@ async def reattach_invoice_to_bill(
             os.unlink(tmp_path)
 
     return {"status": "success", "data": {"bill_id": draft.external_bill_id, "file": file_used, "source": invoice.source}}
+
+
+@router.post("/{draft_id}/unpush")
+def unpush_draft(
+    draft_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_optional_user),
+):
+    """Delete a pushed bill from the billing platform and reset the draft to PENDING_REVIEW.
+
+    Blocked if any payments have been recorded against the draft — those would
+    have to be voided first to keep the audit trail consistent.
+    """
+    from app.models.db_models import InvoicePayment
+
+    repo = DraftRepository(db)
+    draft = repo.get_by_id(draft_id)
+    if not draft:
+        raise HTTPException(status_code=404, detail="Draft not found")
+    if draft.status != "PUSHED":
+        raise HTTPException(status_code=400, detail="Draft is not in PUSHED state")
+    if not draft.external_bill_id:
+        raise HTTPException(status_code=400, detail="No external_bill_id on this draft")
+    if draft.push_to != "zoho":
+        raise HTTPException(status_code=400, detail="Unpush is only supported for Zoho bills")
+
+    payment_count = (
+        db.query(InvoicePayment)
+        .filter(InvoicePayment.draft_id == draft_id)
+        .count()
+    )
+    if payment_count > 0:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot unpush — {payment_count} payment(s) recorded against this draft. Void payments first.",
+        )
+
+    bill_id = draft.external_bill_id
+    invoice_id = draft.invoice_id
+
+    try:
+        from app.platforms.base import get_billing_platform
+        billing = get_billing_platform(db, "zoho")
+        billing.delete_bill(bill_id)
+        logger.info("[UNPUSH] Deleted Zoho bill %s for draft %d", bill_id, draft_id)
+    except Exception as exc:
+        msg = str(exc).lower()
+        # If Zoho already lost the bill, treat as already-deleted and continue local reset
+        if "not found" not in msg and "does not exist" not in msg and "invalid" not in msg:
+            logger.error("[UNPUSH] Zoho delete failed for bill %s: %s", bill_id, exc)
+            raise HTTPException(status_code=502, detail=f"Zoho delete failed: {exc}")
+        logger.warning("[UNPUSH] Zoho says bill %s missing — resetting local state anyway", bill_id)
+
+    repo.update(
+        draft_id,
+        status="PENDING_REVIEW",
+        external_bill_id=None,
+        pushed_at=None,
+        push_error=None,
+        pdf_attached_at=None,
+    )
+    InvoiceRepository(db)._update(invoice_id, zoho_push_status=None, zoho_bill_id=None)
+    AuditLogRepository(db).log(
+        entity_type="draft", entity_id=draft_id, action="unpushed",
+        details={"deleted_bill_id": bill_id, "platform": "zoho", "invoice_id": invoice_id,
+                 "actor_email": user.email if user else None},
+        status="success",
+    )
+    db.commit()
+
+    return {"status": "success", "data": {"draft_id": draft_id, "deleted_bill_id": bill_id}}
 
 
 @router.post("/bulk-approve")

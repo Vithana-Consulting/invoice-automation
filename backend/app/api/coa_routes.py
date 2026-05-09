@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.auth.dependencies import get_current_user
-from app.db.repository import ChartOfAccountRepository
+from app.db.repository import ChartOfAccountRepository, PlatformTdsTaxRepository
 from app.db.session import get_db
 from app.models.db_models import User
 
@@ -30,6 +30,10 @@ class COATagUpdate(BaseModel):
     sub_type: Optional[str] = None  # PURCHASE | SALE | TAX_CGST | TAX_SGST | TAX_IGST | TAX_CESS
     hsn_codes: Optional[list[str]] = None
     is_default: Optional[bool] = None
+    # TDS defaults — applied at bill level when this account is the draft's account
+    tds_section: Optional[str] = None  # e.g. "194J", or "" to clear
+    tds_rate: Optional[float] = None   # editable percent, e.g. 10.00
+    tds_tax_id: Optional[str] = None   # optional override of platform tax id
 
 
 # ─── List Accounts ───────────────────────────────────────────────────────
@@ -119,6 +123,13 @@ def tag_account(
         updates["hsn_codes"] = json.dumps(body.hsn_codes) if body.hsn_codes else None
     if body.is_default is not None:
         updates["is_default"] = body.is_default
+    if body.tds_section is not None:
+        updates["tds_section"] = body.tds_section.strip().upper() or None
+    if body.tds_rate is not None:
+        # treat 0 / negative as "clear"
+        updates["tds_rate"] = body.tds_rate if body.tds_rate and body.tds_rate > 0 else None
+    if body.tds_tax_id is not None:
+        updates["tds_tax_id"] = body.tds_tax_id.strip() or None
 
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
@@ -164,6 +175,78 @@ def deactivate_account(
         raise HTTPException(status_code=404, detail="Account not found")
     repo.update(account_id, is_active=False)
     return {"status": "success", "message": f"Account '{existing.name}' deactivated"}
+
+
+# ─── TDS Tax Sync ────────────────────────────────────────────────────────
+
+@router.post("/tds/sync/{platform}")
+def sync_tds_taxes(
+    platform: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Sync TDS tax masters from a billing platform (Zoho, QuickBooks).
+
+    Pulls TDS-classified taxes (section, rate, platform_tax_id) and upserts
+    into platform_tds_taxes. Used at push-time to resolve a COA's
+    {tds_section, tds_rate} into the platform's tax_id for the bill payload.
+    """
+    from app.platforms.base import get_billing_platform
+
+    try:
+        billing = get_billing_platform(db, platform)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    taxes = billing.list_tds_taxes()
+    repo = PlatformTdsTaxRepository(db)
+    result = repo.sync_from_platform(platform, taxes)
+
+    return {
+        "status": "success",
+        "message": (
+            f"Synced {result['total']} TDS taxes from {platform} "
+            f"({result['created']} new, {result['updated']} updated, "
+            f"{result['deactivated']} deactivated)"
+        ),
+        "data": result,
+    }
+
+
+@router.get("/tds")
+def list_tds_taxes(
+    platform: str = Query(None),
+    active_only: bool = Query(True),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """List synced TDS tax masters."""
+    repo = PlatformTdsTaxRepository(db)
+    if platform:
+        rows = repo.list_by_platform(platform, active_only=active_only)
+    else:
+        q = repo._base_query()
+        if active_only:
+            from app.models.db_models import PlatformTdsTax as _T
+            q = q.filter(_T.is_active.is_(True))
+        rows = q.all()
+    return {
+        "status": "success",
+        "data": [
+            {
+                "id": r.id,
+                "platform": r.platform,
+                "platform_tax_id": r.platform_tax_id,
+                "tax_name": r.tax_name,
+                "section": r.section,
+                "rate": float(r.rate) if r.rate is not None else None,
+                "tax_type": r.tax_type,
+                "is_active": r.is_active,
+                "synced_at": str(r.synced_at) if r.synced_at else None,
+            }
+            for r in rows
+        ],
+    }
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────
@@ -236,5 +319,8 @@ def _account_to_dict(acc) -> dict:
         "sub_type": acc.sub_type,
         "hsn_codes": json.loads(acc.hsn_codes) if acc.hsn_codes else [],
         "is_default": acc.is_default,
+        "tds_section": acc.tds_section,
+        "tds_rate": float(acc.tds_rate) if acc.tds_rate is not None else None,
+        "tds_tax_id": acc.tds_tax_id,
         "synced_at": str(acc.synced_at) if acc.synced_at else None,
     }

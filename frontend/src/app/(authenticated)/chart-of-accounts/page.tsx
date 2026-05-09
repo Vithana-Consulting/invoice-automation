@@ -17,8 +17,20 @@ interface COAccount {
   sub_type: string | null;
   hsn_codes: string[];
   is_default: boolean;
+  tds_section: string | null;
+  tds_rate: number | null;
+  tds_tax_id: string | null;
   synced_at: string | null;
 }
+
+const TDS_SECTION_OPTIONS = [
+  { value: '', label: 'None' },
+  { value: '194C', label: '194C - Contractor' },
+  { value: '194H', label: '194H - Commission' },
+  { value: '194I', label: '194I - Rent' },
+  { value: '194J', label: '194J - Professional/Consultancy (10%)' },
+  { value: '194Q', label: '194Q - Purchase of goods' },
+];
 
 interface IntegrationItem {
   platform: string;
@@ -51,7 +63,7 @@ export default function ChartOfAccountsPage() {
   const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState('all');
   const [editId, setEditId] = useState<number | null>(null);
-  const [editForm, setEditForm] = useState({ sub_type: '', hsn_codes: '', is_default: false });
+  const [editForm, setEditForm] = useState({ sub_type: '', hsn_codes: '', is_default: false, tds_section: '', tds_rate: '' });
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [search, setSearch] = useState('');
   const [syncingPlatform, setSyncingPlatform] = useState<string | null>(null);
@@ -106,6 +118,13 @@ export default function ChartOfAccountsPage() {
     },
   });
 
+  // Sync TDS taxes
+  const syncTdsMutation = useMutation({
+    mutationFn: (platform: string) => api.post<any>(`/api/coa/tds/sync/${platform}`),
+    onSuccess: (res: any) => setMessage({ type: 'success', text: res.message }),
+    onError: (err: Error) => setMessage({ type: 'error', text: err.message }),
+  });
+
   // Auto-tag
   const autoTagMutation = useMutation({
     mutationFn: (platform: string) => api.post<any>(`/api/coa/auto-tag/${platform}`),
@@ -133,18 +152,27 @@ export default function ChartOfAccountsPage() {
       sub_type: acc.sub_type || '',
       hsn_codes: acc.hsn_codes.join(', '),
       is_default: acc.is_default,
+      tds_section: acc.tds_section || '',
+      tds_rate: acc.tds_rate != null ? String(acc.tds_rate) : '',
     });
   };
 
   const handleSave = () => {
     if (!editId) return;
     const hsn = editForm.hsn_codes.split(',').map((s) => s.trim()).filter(Boolean);
+    const tdsRateNum = editForm.tds_rate.trim() === '' ? null : Number(editForm.tds_rate);
+    if (tdsRateNum !== null && (Number.isNaN(tdsRateNum) || tdsRateNum < 0 || tdsRateNum > 100)) {
+      setMessage({ type: 'error', text: 'TDS rate must be a number between 0 and 100.' });
+      return;
+    }
     tagMutation.mutate({
       id: editId,
       body: {
         sub_type: editForm.sub_type || null,
         hsn_codes: hsn.length > 0 ? hsn : null,
         is_default: editForm.is_default,
+        tds_section: editForm.tds_section || '',
+        tds_rate: tdsRateNum ?? 0,
       },
     });
   };
@@ -187,6 +215,14 @@ export default function ChartOfAccountsPage() {
                       Auto-Tag
                     </button>
                   )}
+                  <button
+                    onClick={() => syncTdsMutation.mutate(bp.platform)}
+                    disabled={syncTdsMutation.isPending}
+                    className="px-3 py-1.5 bg-amber-600 text-white rounded-lg hover:bg-amber-700 disabled:opacity-50 text-xs font-medium"
+                    title="Sync TDS tax masters from this platform"
+                  >
+                    Sync TDS
+                  </button>
                 </div>
               </div>
             );
@@ -243,6 +279,22 @@ export default function ChartOfAccountsPage() {
               <input type="checkbox" checked={editForm.is_default} onChange={(e) => setEditForm({ ...editForm, is_default: e.target.checked })} />
               Default for this category
             </label>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">TDS Section</label>
+              <select value={editForm.tds_section} onChange={(e) => setEditForm({ ...editForm, tds_section: e.target.value })}
+                className="border rounded-lg px-3 py-2 text-sm w-64">
+                {TDS_SECTION_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-gray-600 mb-1">TDS Rate (%)</label>
+              <input
+                type="number" min="0" max="100" step="0.01"
+                value={editForm.tds_rate}
+                onChange={(e) => setEditForm({ ...editForm, tds_rate: e.target.value })}
+                className="border rounded-lg px-3 py-2 text-sm w-24" placeholder="10.00"
+              />
+            </div>
             <button onClick={handleSave} disabled={tagMutation.isPending}
               className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 disabled:opacity-50 text-sm">Save</button>
             <button onClick={() => setEditId(null)} className="px-4 py-2 border rounded-lg text-sm hover:bg-gray-50">Cancel</button>
@@ -271,6 +323,7 @@ export default function ChartOfAccountsPage() {
                 <th className="text-left px-4 py-3 font-medium text-gray-500 w-36">Platform Type</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-500 w-32">Category Tag</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-500 w-36">HSN Codes</th>
+                <th className="text-left px-4 py-3 font-medium text-gray-500 w-28">TDS</th>
                 <th className="text-left px-4 py-3 font-medium text-gray-500 w-16">Default</th>
                 <th className="text-right px-4 py-3 font-medium text-gray-500 w-16"></th>
               </tr>
@@ -302,6 +355,20 @@ export default function ChartOfAccountsPage() {
                   </td>
                   <td className="px-4 py-2.5 font-mono text-xs text-gray-500">
                     {a.hsn_codes.length > 0 ? a.hsn_codes.slice(0, 3).join(', ') + (a.hsn_codes.length > 3 ? '...' : '') : '-'}
+                  </td>
+                  <td className="px-4 py-2.5">
+                    {a.tds_section || a.tds_rate != null ? (
+                      <span className="inline-flex items-center gap-1 text-xs">
+                        {a.tds_section && (
+                          <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-medium">{a.tds_section}</span>
+                        )}
+                        {a.tds_rate != null && (
+                          <span className="text-gray-600 font-mono">{a.tds_rate}%</span>
+                        )}
+                      </span>
+                    ) : (
+                      <span className="text-xs text-gray-300">—</span>
+                    )}
                   </td>
                   <td className="px-4 py-2.5 text-center">
                     {a.is_default && <span className="text-xs text-primary-600 font-semibold">Yes</span>}

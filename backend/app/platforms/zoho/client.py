@@ -61,6 +61,12 @@ class ZohoClient:
         return self._handle_response(resp)
 
     @zoho_retry
+    def delete_bill(self, bill_id: str) -> dict:
+        url = f"{self.base_url}/bills/{bill_id}"
+        resp = httpx.delete(url, headers=self._headers(), params=self._params(), timeout=30)
+        return self._handle_response(resp)
+
+    @zoho_retry
     def list_contacts(self, contact_name: str = None, contact_type: str = "vendor") -> list:
         url = f"{self.base_url}/contacts"
         extra = {"contact_type": contact_type}
@@ -104,6 +110,22 @@ class ZohoClient:
                 timeout=60,
             )
         return self._handle_response(resp)
+
+    @zoho_retry
+    def list_tds_taxes(self) -> list:
+        """Fetch TDS tax records from Zoho Books (India edition).
+
+        Endpoint: GET /settings/taxes?is_tds_request=true. With this flag Zoho
+        returns rows scoped to TDS (Direct Taxes → Income TDS Rates), each with
+        tax_type='tds_tax'. Without the flag the same endpoint returns GST taxes.
+        """
+        url = f"{self.base_url}/settings/taxes"
+        resp = httpx.get(
+            url, headers=self._headers(),
+            params=self._params({"is_tds_request": "true"}),
+            timeout=30,
+        )
+        return self._handle_response(resp).get("taxes", [])
 
     def list_chartofaccounts(self) -> list:
         """Fetch all Chart of Accounts from Zoho Books with pagination."""

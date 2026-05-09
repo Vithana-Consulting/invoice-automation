@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import ReactDOM from 'react-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { AgGridReact } from 'ag-grid-react';
@@ -41,6 +41,7 @@ const OVERRIDE_REASON_CODES = [
   { value: 'AMOUNT_VERIFIED_MANUALLY', label: 'Amount verified manually against original invoice' },
   { value: 'DUPLICATE_CONFIRMED_DIFFERENT', label: 'Confirmed this is a different invoice (not a duplicate)' },
   { value: 'GSTIN_CONFIRMED_VALID', label: 'GSTIN confirmed valid via GSTN portal' },
+  { value: 'GSTIN_PAN_VERIFIED_MANUALLY', label: 'GSTIN/PAN mismatch verified manually against the original invoice' },
   { value: 'RCM_CONFIRMED_NOT_APPLICABLE', label: 'RCM confirmed not applicable for this transaction' },
   { value: 'ITC_CUTOFF_CONFIRMED_WITHIN_LIMIT', label: 'ITC time limit confirmed — within filing deadline' },
   { value: 'GST_ROUTING_CONFIGURED_SEPARATELY', label: 'GST routing handled separately (manual verification done)' },
@@ -616,6 +617,92 @@ function BankField({ label, value, raw }: { label: string; value?: string | null
   );
 }
 
+// AG Grid custom editor: typeahead over the COA list for the GL Account column.
+// Wired via cellEditor: GLAccountEditor + cellEditorPopup: true so the dropdown
+// can overflow the row. Returns the chosen account name; the page-level
+// onCellValueChanged translates name → account_id before PUT.
+type GLAccountEditorProps = {
+  value: string | null;
+  options: string[];
+  stopEditing: (cancel?: boolean) => void;
+};
+const GLAccountEditor = forwardRef<{ getValue: () => string }, GLAccountEditorProps>(function GLAccountEditor(
+  { value, options, stopEditing },
+  ref,
+) {
+  const [search, setSearch] = useState(value || '');
+  const [committed, setCommitted] = useState<string>(value || '');
+  const [highlight, setHighlight] = useState(0);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useImperativeHandle(ref, () => ({ getValue: () => committed }), [committed]);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, []);
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    const list = options.filter((n) => n && n.toLowerCase().includes(q));
+    if (!q) return ['', ...list].slice(0, 200);
+    return list.slice(0, 200);
+  }, [options, search]);
+
+  const choose = (name: string) => {
+    setCommitted(name);
+    setSearch(name);
+    // Defer so AG Grid reads via getValue() before tearing the editor down.
+    setTimeout(() => stopEditing(false), 0);
+  };
+
+  const onKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setHighlight((h) => Math.min(h + 1, filtered.length - 1));
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setHighlight((h) => Math.max(h - 1, 0));
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      const pick = filtered[highlight];
+      if (pick !== undefined) choose(pick);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      stopEditing(true);
+    }
+  };
+
+  return (
+    <div className="bg-white border border-gray-300 shadow-lg rounded-md w-72">
+      <input
+        ref={inputRef}
+        value={search}
+        onChange={(e) => { setSearch(e.target.value); setHighlight(0); }}
+        onKeyDown={onKey}
+        placeholder="Search GL account..."
+        className="w-full px-3 py-2 text-sm border-b border-gray-200 outline-none"
+      />
+      <ul className="max-h-64 overflow-y-auto py-1 text-sm">
+        {filtered.length === 0 ? (
+          <li className="px-3 py-2 text-gray-400 italic">No matches</li>
+        ) : (
+          filtered.map((name, i) => (
+            <li
+              key={name || '__empty__'}
+              onMouseDown={(e) => { e.preventDefault(); choose(name); }}
+              onMouseEnter={() => setHighlight(i)}
+              className={`px-3 py-1.5 cursor-pointer ${i === highlight ? 'bg-primary-50 text-primary-700' : 'hover:bg-gray-50'}`}
+            >
+              {name || <span className="text-gray-400 italic">— clear —</span>}
+            </li>
+          ))
+        )}
+      </ul>
+    </div>
+  );
+});
+
 export default function InvoicesPage() {
   const gridRef = useRef<AgGridReact>(null);
   const queryClient = useQueryClient();
@@ -638,6 +725,23 @@ export default function InvoicesPage() {
     queryKey: ['drafts'],
     queryFn: () => api.get<ApiResponse<InvoiceDraft[]> & { total: number }>('/api/drafts?limit=500'),
   });
+
+  // COA list — drives the GL Account dropdown in the grid
+  const { data: coaData } = useQuery({
+    queryKey: ['coa-for-invoices'],
+    queryFn: () => api.get<{ status: string; data: Array<{ id: number; name: string; platform: string }> }>('/api/coa?active_only=true&limit=500'),
+  });
+  const coaAccounts = coaData?.data || [];
+  // Refs so columnDefs identity doesn't change on COA refetch (which would
+  // make AG Grid rebuild columns and drop in-flight edits).
+  const coaOptionsRef = useRef<string[]>(['']);
+  const coaNameToIdRef = useRef<Map<string, number>>(new Map());
+  useEffect(() => {
+    coaOptionsRef.current = ['', ...coaAccounts.map((a) => a.name)];
+    const m = new Map<string, number>();
+    for (const a of coaAccounts) m.set(a.name, a.id);
+    coaNameToIdRef.current = m;
+  }, [coaAccounts]);
 
   const allDrafts = data?.data || [];
   const filteredDrafts = activeTab === 'all' ? allDrafts : allDrafts.filter((d) => d.status === activeTab);
@@ -740,6 +844,19 @@ export default function InvoicesPage() {
     },
   });
 
+  const unpushMutation = useMutation({
+    mutationFn: (draftId: number) =>
+      api.post<ApiResponse<{ draft_id: number; deleted_bill_id: string }>>(`/api/drafts/${draftId}/unpush`),
+    onSuccess: (res) => {
+      queryClient.invalidateQueries({ queryKey: ['drafts'] });
+      setPushMessage({ type: 'success', text: `Zoho bill ${res.data?.deleted_bill_id} deleted. Draft reset to Pending Review.` });
+    },
+    onError: (err: unknown) => {
+      const msg = err instanceof Error ? err.message : 'Unpush failed';
+      setPushMessage({ type: 'error', text: `Unpush failed: ${msg}` });
+    },
+  });
+
   // Manual upload source: POST with file body
   const reattachMutation = useMutation({
     mutationFn: ({ draftId, file }: { draftId: number; file: File }) => {
@@ -796,26 +913,52 @@ export default function InvoicesPage() {
     onError: (err: Error) => setIngestMessage({ type: 'error', text: err.message }),
   });
 
+  const editableUnlessPushed = (p: { data: InvoiceDraft }) => p.data?.status !== 'PUSHED';
+
   const columnDefs = useMemo<ColDef[]>(() => [
     { headerCheckboxSelection: true, checkboxSelection: true, width: 50, pinned: 'left' },
     { field: 'id', headerName: 'ID', width: 70 },
-    { field: 'invoice_number', headerName: 'Invoice #', width: 130 },
-    { field: 'vendor_name', headerName: 'Vendor', width: 200, editable: (p: { data: InvoiceDraft }) => p.data?.status !== 'PUSHED' },
-    { field: 'resolved_vendor_name', headerName: 'Resolved Vendor', width: 180 },
-    { field: 'invoice_date', headerName: 'Date', width: 110 },
+    { field: 'invoice_number', headerName: 'Invoice #', width: 130, editable: editableUnlessPushed },
+    { field: 'vendor_name', headerName: 'Vendor', width: 200, editable: editableUnlessPushed },
+    { field: 'resolved_vendor_name', headerName: 'Resolved Vendor', width: 180, editable: editableUnlessPushed },
+    {
+      field: 'invoice_date',
+      headerName: 'Date',
+      width: 130,
+      editable: editableUnlessPushed,
+      cellEditor: 'agDateStringCellEditor',
+      cellEditorParams: { min: '2000-01-01', max: '2099-12-31' },
+      valueFormatter: (p: { value: string | null }) => p.value || '',
+    },
+    {
+      field: 'due_date',
+      headerName: 'Due Date',
+      width: 130,
+      editable: editableUnlessPushed,
+      cellEditor: 'agDateStringCellEditor',
+      cellEditorParams: { min: '2000-01-01', max: '2099-12-31' },
+      valueFormatter: (p: { value: string | null }) => p.value || '',
+    },
     {
       field: 'total_amount',
       headerName: 'Amount',
       width: 120,
-      editable: (p: { data: InvoiceDraft }) => p.data?.status !== 'PUSHED',
+      editable: editableUnlessPushed,
+      valueParser: (p: { newValue: string }) => {
+        const n = Number(p.newValue);
+        return Number.isFinite(n) ? n : null;
+      },
       valueFormatter: (p: { value: number; data: InvoiceDraft }) =>
         p.value != null ? `${p.data?.currency || ''} ${Number(p.value).toFixed(2)}` : '',
     },
-    { field: 'currency', headerName: 'Cur', width: 60 },
+    { field: 'currency', headerName: 'Cur', width: 70, editable: editableUnlessPushed },
     {
       field: 'invoice_type',
       headerName: 'Type',
-      width: 100,
+      width: 110,
+      editable: editableUnlessPushed,
+      cellEditor: 'agSelectCellEditor',
+      cellEditorParams: { values: ['', 'INBOUND', 'OUTBOUND'] },
       cellRenderer: (p: { value: string }) => {
         if (!p.value) return null;
         const isInbound = p.value === 'INBOUND';
@@ -826,7 +969,15 @@ export default function InvoicesPage() {
         );
       },
     },
-    { field: 'account_name', headerName: 'GL Account', width: 160 },
+    {
+      field: 'account_name',
+      headerName: 'GL Account',
+      width: 220,
+      editable: editableUnlessPushed,
+      cellEditor: GLAccountEditor,
+      cellEditorPopup: true,
+      cellEditorParams: () => ({ options: coaOptionsRef.current }),
+    },
     {
       field: 'tax_breakup',
       headerName: 'CGST',
@@ -851,7 +1002,10 @@ export default function InvoicesPage() {
     {
       field: 'itc_status',
       headerName: 'ITC Status',
-      width: 120,
+      width: 130,
+      editable: editableUnlessPushed,
+      cellEditor: 'agSelectCellEditor',
+      cellEditorParams: { values: ['', 'UNCONFIRMED', 'CONFIRMED', 'INELIGIBLE', 'NA'] },
       cellRenderer: (p: { value: string }) => {
         if (!p.value) return null;
         const cls = ITC_STATUS_COLORS[p.value] || 'bg-gray-100 text-gray-600';
@@ -862,28 +1016,13 @@ export default function InvoicesPage() {
         );
       },
     },
-    {
-      field: 'tds_applicable',
-      headerName: 'TDS',
-      width: 75,
-      cellRenderer: (p: { value: boolean | null }) => {
-        if (p.value === null || p.value === undefined) {
-          return <span className="text-xs text-gray-400 italic">unset</span>;
-        }
-        return (
-          <span className={`text-xs px-2 py-0.5 rounded-full ${p.value ? 'bg-orange-100 text-orange-700' : 'bg-gray-100 text-gray-600'}`}>
-            {p.value ? 'Yes' : 'No'}
-          </span>
-        );
-      },
-    },
-    { field: 'place_of_supply', headerName: 'POS', width: 65 },
+    { field: 'place_of_supply', headerName: 'POS', width: 75, editable: editableUnlessPushed },
     { field: 'source', headerName: 'Source', width: 100 },
     {
       field: 'push_to',
       headerName: 'Push To',
       width: 130,
-      editable: (p: { data: InvoiceDraft }) => p.data?.status !== 'PUSHED',
+      editable: editableUnlessPushed,
       cellEditor: 'agSelectCellEditor',
       cellEditorParams: { values: ['', 'zoho', 'tally', 'quickbooks'] },
     },
@@ -1003,6 +1142,22 @@ export default function InvoicesPage() {
                 {reattachGmailMutation.isPending ? '...' : 'Attach PDF'}
               </button>
             )}
+            {draft.status === 'PUSHED' && draft.push_to === 'zoho' && (
+              <button
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (window.confirm(`Delete Zoho bill ${draft.external_bill_id} and reset this draft to Pending Review? This cannot be undone.`)) {
+                    unpushMutation.mutate(draft.id);
+                  }
+                }}
+                disabled={unpushMutation.isPending}
+                title="Delete this bill in Zoho and revert the draft to Pending Review"
+                className="px-2 py-1 text-xs bg-red-100 text-red-700 rounded hover:bg-red-200 disabled:opacity-50"
+              >
+                {unpushMutation.isPending ? '...' : 'Unpush'}
+              </button>
+            )}
             {(draft.status === 'PUSH_FAILED' || hasBlocks) && (
               <button
                 onMouseDown={(e) => e.stopPropagation()}
@@ -1021,11 +1176,31 @@ export default function InvoicesPage() {
         );
       },
     },
-  ], [approveMutation, pushMutation, reparseMutation, reattachMutation, reattachGmailMutation, handlePush, setReattachModal]);  // eslint-disable-line react-hooks/exhaustive-deps
+  ], [approveMutation, pushMutation, reparseMutation, reattachMutation, reattachGmailMutation, unpushMutation, handlePush, setReattachModal]);  // eslint-disable-line react-hooks/exhaustive-deps
 
   const onCellValueChanged = useCallback((event: CellValueChangedEvent) => {
     const draft = event.data as InvoiceDraft;
-    updateMutation.mutate({ id: draft.id, body: { [event.colDef.field!]: event.newValue } });
+    if (draft.status === 'PUSHED') return;
+    const field = event.colDef.field;
+    if (!field) return;
+
+    // Normalise empty string → null so cleared date/text fields round-trip cleanly.
+    let newVal = event.newValue;
+    if (typeof newVal === 'string' && newVal.trim() === '') newVal = null;
+    if (newVal === event.oldValue) return;
+    if (newVal == null && (event.oldValue == null || event.oldValue === '')) return;
+
+    // GL Account is shown as a name dropdown, but the backend stores account_id (FK).
+    // Translate name → id; empty string clears the link.
+    if (field === 'account_name') {
+      const name = (newVal ?? '') as string;
+      const accountId = name ? coaNameToIdRef.current.get(name) ?? null : null;
+      if (name && accountId == null) return; // unknown name — refuse silently
+      updateMutation.mutate({ id: draft.id, body: { account_id: accountId } });
+      return;
+    }
+
+    updateMutation.mutate({ id: draft.id, body: { [field]: newVal } });
   }, [updateMutation]);
 
   const onSelectionChanged = useCallback(() => {
@@ -1187,6 +1362,8 @@ export default function InvoicesPage() {
           rowSelection="multiple"
           onSelectionChanged={onSelectionChanged}
           onCellValueChanged={onCellValueChanged}
+          getRowId={(p) => String((p.data as InvoiceDraft).id)}
+          stopEditingWhenCellsLoseFocus
           animateRows={true}
           loading={isLoading}
           getRowStyle={(p) => {

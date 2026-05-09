@@ -65,6 +65,16 @@ class BillingPlatform(ABC):
         """
         return []
 
+    def list_tds_taxes(self) -> List[Dict[str, Any]]:
+        """List TDS tax masters from the platform.
+
+        Returns list of:
+          {'id': str, 'name': str, 'section': str, 'rate': float, 'tax_type': str, 'is_active': bool, 'raw': dict}
+
+        Not all platforms support TDS. Default returns empty list.
+        """
+        return []
+
     @classmethod
     @abstractmethod
     def get_config_fields(cls) -> List[Dict[str, Any]]:

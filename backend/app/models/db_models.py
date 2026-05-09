@@ -349,6 +349,12 @@ class ChartOfAccount(Base):
     hsn_codes = Column(Text, nullable=True)  # JSON array of HSN codes mapped to this account
     is_default = Column(Boolean, default=False)  # default account for this sub_type on this platform
 
+    # TDS defaults — when a draft uses this account, these drive bill-level TDS on push.
+    # Resolved at push-time: tds_section + tds_rate → platform_tds_taxes.platform_tax_id.
+    tds_section = Column(String(20), nullable=True)  # 194J | 194C | 194I | 194H | 194Q ...
+    tds_rate = Column(Numeric(5, 2), nullable=True)  # editable percent, e.g. 10.00
+    tds_tax_id = Column(String(100), nullable=True)  # cached platform tax id (optional override)
+
     synced_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -376,6 +382,34 @@ class PlatformVendor(Base):
 
     __table_args__ = (
         Index("ix_platform_vendors_unique", "company_id", "platform", "platform_vendor_id", unique=True),
+    )
+
+
+class PlatformTdsTax(Base):
+    """TDS tax masters synced from billing platforms (Zoho, QuickBooks).
+
+    Resolved at push-time from chart_of_accounts.{tds_section, tds_rate}
+    → matching row here → platform_tax_id sent on the bill payload.
+    """
+    __tablename__ = "platform_tds_taxes"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    platform = Column(String(30), nullable=False)
+    platform_tax_id = Column(String(100), nullable=False)
+    tax_name = Column(String(200), nullable=False)
+    section = Column(String(20), nullable=True)   # 194J | 194C | ...
+    rate = Column(Numeric(5, 2), nullable=True)
+    tax_type = Column(String(30), nullable=True)  # tds | tcs | etc.
+    is_active = Column(Boolean, default=True)
+    raw_data = Column(Text, nullable=True)
+    synced_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        Index("ix_platform_tds_taxes_unique", "company_id", "platform", "platform_tax_id", unique=True),
+        Index("ix_platform_tds_taxes_lookup", "company_id", "platform", "section", "rate"),
     )
 
 

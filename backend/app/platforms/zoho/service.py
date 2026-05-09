@@ -183,6 +183,8 @@ class ZohoBilling(BillingPlatform):
                 accounts=accounts,
                 fallback_account_id=self.client.default_account_id,
                 tax_id=use_tax_id or None,
+                tds_tax_id=accounts.tds_tax_id if accounts else None,
+                draft=draft,
             )
             return self.client.create_bill(payload)
 
@@ -225,6 +227,10 @@ class ZohoBilling(BillingPlatform):
         bill = result.get("bill", {})
         return {"external_id": bill.get("bill_id", ""), "platform": "zoho"}
 
+    def delete_bill(self, bill_id: str) -> None:
+        """Delete a bill in Zoho Books. Raises ZohoError on failure."""
+        self.client.delete_bill(bill_id)
+
     def list_accounts(self) -> List[Dict[str, Any]]:
         """Fetch Chart of Accounts from Zoho Books."""
         try:
@@ -246,6 +252,50 @@ class ZohoBilling(BillingPlatform):
         except Exception as e:
             logger.error("Failed to list Zoho accounts: %s", e)
             return []
+
+    def list_tds_taxes(self) -> List[Dict[str, Any]]:
+        """Fetch TDS tax masters from Zoho Books India.
+
+        The client hits /settings/taxes?is_tds_request=true, which returns
+        Direct-Taxes / Income-TDS rows with tax_type='tds_tax'. Section codes
+        live inside the tax_name (e.g. "(Section 194 J)"); we normalise that to
+        "194J". Rate is on `tax_percentage`.
+        """
+        import re
+        try:
+            rows = self.client.list_tds_taxes()
+        except Exception as e:
+            logger.error("Failed to list Zoho TDS taxes: %s", e)
+            return []
+
+        # Match "194", "194 J", "194J", "194-J", "192B", "206C", etc.
+        section_re = re.compile(r"\b(19[2-6]|20[6-7])\s*[\- ]?\s*([A-Z]{1,2})?\b")
+        results: List[Dict[str, Any]] = []
+        for t in rows:
+            ttype = (t.get("tax_type") or "").lower()
+            name = t.get("tax_name") or t.get("name") or ""
+            # Trust Zoho's own tag first; otherwise heuristic on name.
+            is_tds = ttype == "tds_tax" or "tds" in name.lower() or "194" in name or "tcs" in name.lower()
+            if not is_tds:
+                continue
+            section = None
+            m = section_re.search(name.upper())
+            if m:
+                section = (m.group(1) + (m.group(2) or "")).strip()
+            try:
+                rate = float(t.get("tax_percentage") or t.get("rate") or 0) or None
+            except (TypeError, ValueError):
+                rate = None
+            results.append({
+                "id": str(t.get("tax_id") or t.get("id") or ""),
+                "name": name,
+                "section": section,
+                "rate": rate,
+                "tax_type": "tds",
+                "is_active": not bool(t.get("is_inactive", False)) and bool(t.get("is_active", True)),
+                "raw": t,
+            })
+        return results
 
     def list_vendors(self) -> List[Dict[str, Any]]:
         try:

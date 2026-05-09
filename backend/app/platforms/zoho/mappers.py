@@ -18,19 +18,36 @@ def to_zoho_date(date_str: str | None) -> str | None:
     return None
 
 
+def _pick(draft, invoice, field):
+    """Prefer the draft's value (user-edited), fall back to invoice (LLM-extracted)."""
+    val = getattr(draft, field, None) if draft is not None else None
+    if val not in (None, ""):
+        return val
+    return getattr(invoice, field, None)
+
+
 def invoice_to_zoho_bill(
     invoice,
     vendor_id: str,
     accounts: Optional[ResolvedAccounts] = None,
     fallback_account_id: str = "",
     tax_id: Optional[str] = None,
+    tds_tax_id: Optional[str] = None,
+    draft=None,
 ) -> dict:
-    """Map an InvoiceRecord to Zoho Books create-bill payload.
+    """Map an InvoiceRecord (and optional InvoiceDraft) to a Zoho Books create-bill payload.
+
+    Field source priority — draft first, invoice as fallback:
+      invoice_number, invoice_date, due_date, total_amount, line_items_json
+    Read from `invoice` only: buyer_gst_number, gst_number, file_name, id.
 
     Account resolution priority per line item:
       1. HSN/SAC code match in accounts.hsn_account_map
       2. Draft-level COA account (accounts.main_account_ref)
       3. Fallback account_id from Zoho integration config
+
+    TDS is bill-level. When tds_tax_id is provided (or carried on `accounts`),
+    Zoho computes the withhold amount from its rate — we never compute it here.
     """
     # Draft-level fallback account
     draft_account_id = ""
@@ -41,11 +58,17 @@ def invoice_to_zoho_bill(
 
     hsn_map = (accounts.hsn_account_map or {}) if accounts else {}
 
-    # Build line items from invoice
+    invoice_number = _pick(draft, invoice, "invoice_number")
+    invoice_date = _pick(draft, invoice, "invoice_date")
+    due_date = _pick(draft, invoice, "due_date")
+    total_amount = _pick(draft, invoice, "total_amount")
+    line_items_json = _pick(draft, invoice, "line_items_json")
+
+    # Build line items — prefer the draft's edited line items
     line_items_raw = []
-    if invoice.line_items_json:
+    if line_items_json:
         try:
-            line_items_raw = json.loads(invoice.line_items_json)
+            line_items_raw = json.loads(line_items_json)
         except json.JSONDecodeError:
             pass
 
@@ -72,8 +95,8 @@ def invoice_to_zoho_bill(
         zoho_items.append(zi)
 
     if not zoho_items:
-        amount = float(invoice.total_amount) if invoice.total_amount else 0.0
-        fallback_name = f"Invoice {invoice.invoice_number or invoice.file_name or 'item'}"
+        amount = float(total_amount) if total_amount else 0.0
+        fallback_name = f"Invoice {invoice_number or invoice.file_name or 'item'}"
         zi = {
             "name": fallback_name,
             "description": fallback_name,
@@ -88,15 +111,15 @@ def invoice_to_zoho_bill(
 
     payload = {
         "vendor_id": vendor_id,
-        "bill_number": invoice.invoice_number or f"BILL-{invoice.id}",
-        "reference_number": invoice.invoice_number,
+        "bill_number": invoice_number or f"BILL-{invoice.id}",
+        "reference_number": invoice_number,
         "line_items": zoho_items,
     }
 
-    d = to_zoho_date(invoice.invoice_date)
+    d = to_zoho_date(invoice_date)
     if d:
         payload["date"] = d
-    d = to_zoho_date(invoice.due_date)
+    d = to_zoho_date(due_date)
     if d:
         payload["due_date"] = d
 
@@ -109,7 +132,12 @@ def invoice_to_zoho_bill(
         if buyer_state_name:
             payload["destination_of_supply"] = buyer_state_name
 
-    payload["notes"] = f"Auto-imported from invoice {invoice.invoice_number or invoice.file_name}"
+    # TDS — bill-level. Explicit tds_tax_id arg wins, else fall back to accounts.tds_tax_id.
+    resolved_tds = tds_tax_id or (accounts.tds_tax_id if accounts else None)
+    if resolved_tds:
+        payload["tds_tax_id"] = resolved_tds
+
+    payload["notes"] = f"Auto-imported from invoice {invoice_number or invoice.file_name}"
     return payload
 
 
