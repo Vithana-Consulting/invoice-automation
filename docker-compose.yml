@@ -1,28 +1,28 @@
-version: "3.8"
-
 services:
   backend:
     build: ./backend
     ports:
-      - "8000:8000"
+      - "0.0.0.0:8000:8000"
     env_file: ./backend/.env
     environment:
       DATABASE_URL: mysql+pymysql://accounting:accounting@db:3306/accounting_automation
+      FRONTEND_URL: http://192.168.68.113:3000
     volumes:
       - attachments:/app/data/attachments
-      - ./backend/credentials.json:/app/credentials.json:ro
-      - ./backend/token.json:/app/token.json
     depends_on:
       db:
         condition: service_healthy
     restart: unless-stopped
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: http://192.168.68.113:8000
     ports:
-      - "3000:3000"
+      - "0.0.0.0:3000:3000"
     environment:
-      NEXT_PUBLIC_API_URL: http://localhost:8000
+      NEXT_PUBLIC_API_URL: http://192.168.68.113:8000
     depends_on:
       - backend
     restart: unless-stopped
@@ -34,15 +34,14 @@ services:
       MYSQL_DATABASE: accounting_automation
       MYSQL_USER: accounting
       MYSQL_PASSWORD: accounting
-    ports:
-      - "3306:3306"
+    # No host port — MySQL stays on the docker network only.
     volumes:
       - mysql_data:/var/lib/mysql
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uaccounting", "-paccounting"]
       interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 20
     restart: unless-stopped
 
 volumes:
