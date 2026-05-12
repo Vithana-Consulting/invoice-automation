@@ -8,10 +8,13 @@ One Google Cloud project covers both. You create **two separate OAuth 2.0 Client
 
 ## Overview
 
-| What | OAuth Client | Redirect URI | Scope |
-|------|-------------|-------------|-------|
+| What | OAuth Client | Redirect URI (sub-route) | Scope |
+|------|-------------|--------------------------|-------|
 | User login | Web application | `/api/auth/google/callback` | `openid email profile` |
 | Gmail read | Web application | `/api/settings/gmail-callback` | `https://mail.google.com/` |
+
+> Prefix each sub-route with your backend base URL when entering them in Google Cloud Console.
+> Local: `http://localhost:8000`  |  Production: `https://api.yourdomain.com`
 
 ---
 
@@ -94,16 +97,14 @@ This client handles the **Sign in with Google** flow.
 3. **Application type:** `Web application`
 4. **Name:** `Vithana Login`
 
-**Authorised redirect URIs — click "+ Add URI" and add ALL of these:**
+**Authorised redirect URIs — click "+ Add URI":**
 
 ```
 http://localhost:8000/api/auth/google/callback
 ```
 
-> For production, also add your production URL:
-> ```
-> https://yourdomain.com/api/auth/google/callback
-> ```
+> Sub-route: `/api/auth/google/callback`
+> For production add: `https://api.yourdomain.com/api/auth/google/callback`
 
 5. Click **Create**
 
@@ -129,21 +130,14 @@ This is a **separate** client for Gmail inbox access (different redirect URI and
 3. **Application type:** `Web application`
 4. **Name:** `Vithana Gmail`
 
-**Authorised redirect URIs — click "+ Add URI" and add ALL of these:**
+**Authorised redirect URIs — click "+ Add URI":**
 
 ```
 http://localhost:8000/api/settings/gmail-callback
 ```
 
-> As seen in your screenshot, you should add both ports if you're ever running on 8001 too:
-> ```
-> http://localhost:8000/api/settings/gmail-callback
-> http://localhost:8001/api/settings/gmail-callback
-> ```
-> For production also add:
-> ```
-> https://yourdomain.com/api/settings/gmail-callback
-> ```
+> Sub-route: `/api/settings/gmail-callback`
+> For production add: `https://api.yourdomain.com/api/settings/gmail-callback`
 
 5. Click **Create**
 
@@ -152,7 +146,7 @@ http://localhost:8000/api/settings/gmail-callback
 6. **Copy the Client ID and Client Secret** for the Gmail client
 7. Click **Download JSON** — save as `gmail_credentials.json`
 
-> This downloaded JSON is exactly the file you upload in the Vithana Settings page (Step 9). Keep it safe.
+> This downloaded JSON is exactly the file you upload in the Vithana Settings page (Step 8). Keep it safe.
 
 8. Click **OK**
 
@@ -164,8 +158,8 @@ This wires the Google login credentials to your company in Vithana.
 
 ### 6a — Open the Admin Dashboard
 
-1. Go to `http://localhost:3001/admin`
-2. Enter the Admin API Key: `v1th4n4-flush-s3cr3t-2026`
+1. Go to **Admin** in the Vithana UI
+2. Enter the Admin API Key
 3. Click **Login**
 
 ### 6b — Create the Company (if not done yet)
@@ -178,7 +172,7 @@ This wires the Google login credentials to your company in Vithana.
    | Company Name | `Entvin Labs Private Limited` |
    | Domain | `entvin.com` |
 4. Click **Create**
-5. Note the **Company ID** shown (e.g. `9`) — you need it next
+5. Note the **Company ID** shown (e.g. `10`) — you need it next
 
 > **Domain mapping is how login works.** A user who logs in with `user@entvin.com` is automatically routed to this company. Set the domain to match your team's Google Workspace email domain.
 
@@ -195,8 +189,8 @@ This wires the Google login credentials to your company in Vithana.
 
 **Via API (alternative):**
 ```bash
-curl -X PUT http://localhost:8000/api/admin/companies/9/oauth \
-  -H "X-Admin-Key: v1th4n4-flush-s3cr3t-2026" \
+curl -X PUT http://localhost:8000/api/admin/companies/{COMPANY_ID}/oauth \
+  -H "X-Admin-Key: YOUR_ADMIN_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "client_id": "YOUR_LOGIN_CLIENT_ID",
@@ -218,13 +212,13 @@ curl -X PUT http://localhost:8000/api/admin/companies/9/oauth \
 
 ## Step 7 — Test User Login
 
-1. Open `http://localhost:3001` in your browser
+1. Open the Vithana app in your browser
 2. The login page asks for your **email address** (not a username)
 3. Enter your email (e.g. `deepak2004sakthi@gmail.com`)
 4. Click **Continue** — the system looks up your email domain → finds your company → builds the Google OAuth URL
 5. You're redirected to Google's consent screen
 6. Click **Allow** / **Continue**
-7. Google redirects back to `http://localhost:8000/api/auth/google/callback`
+7. Google redirects back to `/api/auth/google/callback`
 8. The backend creates your user + company_member record and sets a JWT cookie
 9. You land on the **Invoices** page — login is complete
 
@@ -242,7 +236,7 @@ After logging in, set up Gmail so the platform can read your inbox.
 
 ### 8a — Upload Gmail Credentials
 
-1. Go to `http://localhost:3001/settings`
+1. Go to **Settings** in the Vithana app
 2. Click the **Gmail** tab
 3. Click **Upload credentials.json**
 4. Select the `gmail_credentials.json` file you downloaded in Step 5
@@ -260,18 +254,17 @@ The Gmail OAuth callback URI must match what you registered in Step 5.
 |-----|-------|
 | `GOOGLE_REDIRECT_URI` | `http://localhost:8000/api/settings/gmail-callback` |
 
-> Note: `GOOGLE_REDIRECT_URI` is shared between login and Gmail callbacks in the system config. The Gmail callback is at `/api/settings/gmail-callback` — make sure this matches exactly what you entered in the Google Cloud Console in Step 5.
+> Sub-route: `/api/settings/gmail-callback` — must match exactly what you entered in Google Cloud Console in Step 5.
 
 ### 8c — Authorise Gmail Access
 
-1. Still on Settings → Gmail tab
+1. Still on **Settings** → Gmail tab
 2. Click **Authorise Gmail**
 3. You're redirected to Google's consent screen — this time it asks for **Gmail access** (`Read, compose, send, and permanently delete all your email from Gmail`)
 4. Click **Allow**
-5. Google redirects back to `http://localhost:8000/api/settings/gmail-callback`
+5. Google redirects back to `/api/settings/gmail-callback`
 6. The backend exchanges the code for a token and stores it encrypted in the database
-7. You're redirected back to `http://localhost:3001/settings?gmail=connected`
-8. The Settings page shows **Gmail: Connected** with a green indicator
+7. You're redirected back to **Settings** — the page shows **Gmail: Connected** with a green indicator
 
 ### 8d — Set Gmail Label (Optional)
 
@@ -279,7 +272,7 @@ By default the system fetches emails with the Gmail label **`Invoices`**.
 
 To use a different label:
 1. In Gmail, create a label (e.g. `Bills`, `AP`, `Vendor Invoices`)
-2. In Vithana Settings → Gmail → **Label** field, type the exact label name
+2. In Vithana **Settings** → Gmail → **Label** field, type the exact label name
 3. Click **Save**
 
 The label match is case-sensitive and must exactly match your Gmail label.
@@ -288,7 +281,7 @@ The label match is case-sensitive and must exactly match your Gmail label.
 
 ## Step 9 — Ingest Emails
 
-1. Go to `http://localhost:3001/invoices`
+1. Go to the **Invoices** page in Vithana
 2. Click **Ingest Emails** (top-right button)
 3. The system fetches up to 200 emails labelled with your configured label
 4. PDF and image attachments are extracted, parsed by GPT-4o, and appear as invoices
@@ -301,21 +294,14 @@ The label match is case-sensitive and must exactly match your Gmail label.
 
 ---
 
-## Redirect URI Quick Reference
+## Redirect URI Reference
 
-Add ALL of these to **both** OAuth clients in Google Cloud Console:
+| Flow | Sub-route | Full URI (local) |
+|------|-----------|-----------------|
+| User login | `/api/auth/google/callback` | `http://localhost:8000/api/auth/google/callback` |
+| Gmail access | `/api/settings/gmail-callback` | `http://localhost:8000/api/settings/gmail-callback` |
 
-### Login Client (Step 4)
-```
-http://localhost:8000/api/auth/google/callback
-```
-
-### Gmail Client (Step 5)
-```
-http://localhost:8000/api/settings/gmail-callback
-```
-
-> **Your screenshot shows 4 URIs configured** — both 8000 and 8001 for each callback. This is correct for a setup where the backend might run on either port. The canonical port is **8000** per the project `.env`.
+Enter the **Full URI** in Google Cloud Console. Enter only the **Sub-route** in Vithana's System Config (`GOOGLE_REDIRECT_URI`).
 
 ---
 
@@ -326,7 +312,7 @@ After completing all steps you will have:
 | Credential | Where stored | Used for |
 |-----------|-------------|---------|
 | Login Client ID + Secret | Vithana DB (`integrations`, platform=`google_oauth`) | User login per company |
-| Gmail Client ID + Secret | `gmail_credentials.json` uploaded via Settings UI → DB (`integrations`, platform=`gmail`) | Gmail inbox read access |
+| Gmail Client ID + Secret | `gmail_credentials.json` uploaded via Settings → DB (`integrations`, platform=`gmail`) | Gmail inbox read access |
 | Gmail OAuth Token | Vithana DB (`integrations`, platform=`gmail`) | Auto-refreshed; stored after Step 8c |
 | Vithana JWT | Browser cookie (`access_token`, HttpOnly) | All API calls after login |
 
