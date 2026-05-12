@@ -9,7 +9,7 @@ import { SubTabs } from '@/components/ui/sub-tabs';
 
 interface SettingsData {
   user: { id: number; email: string; name: string; picture_url: string | null };
-  company: { id: number; name: string; domain: string; gst_number: string | null; pan_number: string | null };
+  company: { id: number; name: string; domain: string; legal_name: string | null; gst_number: string | null; pan_number: string | null };
   gmail: { credentials_uploaded: boolean; token_exists: boolean; label: string };
 }
 
@@ -32,6 +32,7 @@ export default function SettingsPage() {
   // Editable values for config forms
   const [sysEdits, setSysEdits] = useState<Record<string, string>>({});
   const [rtEdits, setRtEdits] = useState<Record<string, string>>({});
+  const [companyLegalName, setCompanyLegalName] = useState('');
   const [companyGst, setCompanyGst] = useState('');
   const [companyPan, setCompanyPan] = useState('');
   const [companyLoaded, setCompanyLoaded] = useState(false);
@@ -134,6 +135,7 @@ export default function SettingsPage() {
   // Load company GST/PAN when data arrives
   useEffect(() => {
     if (data?.data?.company && !companyLoaded) {
+      setCompanyLegalName(data.data.company.legal_name || '');
       setCompanyGst(data.data.company.gst_number || '');
       setCompanyPan(data.data.company.pan_number || '');
       setCompanyLoaded(true);
@@ -143,8 +145,8 @@ export default function SettingsPage() {
   const saveCompanySettings = async () => {
     setConfigMessage(null);
     try {
-      await api.put('/api/settings/company', { gst_number: companyGst, pan_number: companyPan });
-      setConfigMessage({ type: 'success', text: 'Company GST/PAN updated' });
+      await api.put('/api/settings/company', { legal_name: companyLegalName, gst_number: companyGst, pan_number: companyPan });
+      setConfigMessage({ type: 'success', text: 'Company details updated' });
       queryClient.invalidateQueries({ queryKey: ['settings'] });
     } catch (e: any) { setConfigMessage({ type: 'error', text: e.message }); }
   };
@@ -255,12 +257,22 @@ export default function SettingsPage() {
 
           <div className="space-y-4">
             <div className="flex justify-between py-2 border-b">
-              <span className="text-sm text-gray-500">Company Name</span>
-              <span className="text-sm font-medium text-gray-700">{settings?.company?.name || '-'}</span>
-            </div>
-            <div className="flex justify-between py-2 border-b">
               <span className="text-sm text-gray-500">Domain</span>
               <span className="text-sm text-gray-700">{settings?.company?.domain || '-'}</span>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Legal Name</label>
+              <input
+                value={companyLegalName}
+                onChange={(e) => setCompanyLegalName(e.target.value)}
+                className="w-full border rounded-lg px-3 py-2 text-sm"
+                placeholder="e.g., GRNRM TALENT NETWORK PRIVATE LIMITED"
+              />
+              <p className="text-xs text-gray-400 mt-1">
+                Your company's full legal name as it appears in the "Billed To" box on vendor invoices.
+                The AI uses this to distinguish your company (recipient) from the vendor (issuer) during parsing.
+              </p>
             </div>
 
             <div>

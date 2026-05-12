@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import Optional
 
 from app.models.domain import Invoice
 
@@ -18,12 +19,16 @@ class InvoiceParser(ABC):
     """
 
     @abstractmethod
-    def parse(self, file_path: str, file_type: str) -> Invoice:
+    def parse(self, file_path: str, file_type: str,
+              buyer_hint: Optional[dict] = None) -> Invoice:
         """Extract invoice metadata from a document file.
 
         Args:
             file_path: Absolute path to the PDF or image file.
             file_type: File extension without dot (pdf, jpg, png, tiff).
+            buyer_hint: Optional dict with keys legal_name, gst_number, pan_number
+                        identifying the buyer/recipient (your company). Injected into
+                        the LLM prompt so the AI never mistakes your company for the vendor.
 
         Returns:
             Invoice domain object with all extracted fields.

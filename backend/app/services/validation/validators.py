@@ -90,6 +90,39 @@ class GSTINFormatValidator(InvoiceValidator):
                                 {"gstin": gstin})
 
 
+class GSTINPanMatchValidator(InvoiceValidator):
+    """Vendor GSTIN positions 3-12 must equal the parsed vendor PAN.
+
+    A mismatch means one of the two was mis-parsed by OCR/LLM — pushing either
+    risks an incorrect bill in Zoho and ITC denial. Skipped if either field is
+    blank (those cases are handled by RCMValidator / GSTINFormatValidator).
+    """
+    code = "GSTIN_PAN_MISMATCH"
+
+    def validate(self, draft, invoice, db) -> ValidationResult:
+        from app.utils.gstin_utils import (
+            extract_pan_from_gstin, validate_gstin_format, validate_pan_format,
+        )
+        gstin = (getattr(invoice, "gst_number", None) or "").strip().upper()
+        pan = (getattr(invoice, "pan_number", None) or "").strip().upper()
+        if not gstin or not pan:
+            return ValidationResult(self.code, True, Severity.HARD_BLOCK,
+                                    "Either GSTIN or PAN missing — cross-check skipped")
+        if not validate_gstin_format(gstin) or not validate_pan_format(pan):
+            # Format issues are flagged by GSTINFormatValidator separately
+            return ValidationResult(self.code, True, Severity.HARD_BLOCK,
+                                    "GSTIN or PAN format invalid — handled by other validators")
+        embedded = extract_pan_from_gstin(gstin)
+        if embedded == pan:
+            return ValidationResult(self.code, True, Severity.HARD_BLOCK,
+                                    f"GSTIN-embedded PAN matches parsed PAN ({pan})")
+        return ValidationResult(self.code, False, Severity.HARD_BLOCK,
+                                f"Vendor GSTIN '{gstin}' embeds PAN '{embedded}', but parsed vendor PAN is '{pan}'. "
+                                "One of the two is mis-read. Reparse this invoice or correct the values manually "
+                                "before pushing — pushing a mismatched bill causes ITC denial.",
+                                {"gstin": gstin, "embedded_pan": embedded, "parsed_pan": pan})
+
+
 class RCMValidator(InvoiceValidator):
     """Blank vendor GSTIN = unregistered vendor = RCM self-assessment required (S.9(4))."""
     code = "RCM_SELF_ASSESSMENT_REQUIRED"
@@ -310,6 +343,7 @@ def build_pre_push_pipeline():
     return ValidationPipeline([
         CompositionVendorValidator(),
         GSTINFormatValidator(),
+        GSTINPanMatchValidator(),
         RCMValidator(),
         GSTRoutingValidator(),
         ITCTimeLimitValidator(),

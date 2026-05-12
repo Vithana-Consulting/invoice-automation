@@ -98,21 +98,51 @@ def _validate_invoice(invoice) -> list[str]:
         except ValueError:
             errors.append(f"invoice_date '{raw_date}' is not a valid YYYY-MM-DD date")
 
-    # 5. vendor GSTIN checksum
+    # 5. vendor GSTIN — checksum + PAN cross-check
     if invoice.gst_number:
-        if not _validate_gstin_checksum(invoice.gst_number):
+        gstin = str(invoice.gst_number).strip().upper()
+        if len(gstin) != 15:
             errors.append(
-                f"vendor_gstin '{invoice.gst_number}' failed checksum — "
+                f"vendor_gstin '{invoice.gst_number}' is {len(gstin)} characters — must be exactly 15. "
+                f"Format: <2-digit state><10-char PAN><1-digit entity><Z><1-char check>. "
+                f"Re-read every character from the invoice."
+            )
+        elif not _validate_gstin_checksum(gstin):
+            errors.append(
+                f"vendor_gstin '{invoice.gst_number}' failed format/checksum — "
                 "re-read it character by character from the invoice"
             )
+        # Cross-check: GSTIN positions 3-12 must equal vendor PAN
+        if invoice.pan_number:
+            embedded_pan = gstin[2:12] if len(gstin) >= 12 else ""
+            parsed_pan = str(invoice.pan_number).strip().upper()
+            if embedded_pan and embedded_pan != parsed_pan:
+                errors.append(
+                    f"vendor_gstin '{invoice.gst_number}' embedded PAN ('{embedded_pan}') does not match "
+                    f"parsed pan_number ('{parsed_pan}'). One of the two is mis-read — re-read both fields. "
+                    f"GSTIN positions 3-12 must equal the PAN exactly."
+                )
 
-    # 6. buyer GSTIN checksum
+    # 6. buyer GSTIN — checksum + PAN cross-check
     if invoice.buyer_gst_number:
-        if not _validate_gstin_checksum(invoice.buyer_gst_number):
+        b_gstin = str(invoice.buyer_gst_number).strip().upper()
+        if len(b_gstin) != 15:
             errors.append(
-                f"vendor_gstin '{invoice.buyer_gst_number}' failed checksum — "
+                f"buyer_gst_number '{invoice.buyer_gst_number}' is {len(b_gstin)} characters — must be exactly 15."
+            )
+        elif not _validate_gstin_checksum(b_gstin):
+            errors.append(
+                f"buyer_gst_number '{invoice.buyer_gst_number}' failed format/checksum — "
                 "re-read it character by character from the invoice"
             )
+        if getattr(invoice, "buyer_pan_number", None):
+            embedded_pan = b_gstin[2:12] if len(b_gstin) >= 12 else ""
+            parsed_pan = str(invoice.buyer_pan_number).strip().upper()
+            if embedded_pan and embedded_pan != parsed_pan:
+                errors.append(
+                    f"buyer_gst_number '{invoice.buyer_gst_number}' embedded PAN ('{embedded_pan}') does not match "
+                    f"parsed buyer_pan_number ('{parsed_pan}'). Re-read both fields."
+                )
 
     # 7. vendor_name legal suffix check (only when vendor has a GSTIN — i.e. registered entity)
     if invoice.gst_number and invoice.vendor_name:
@@ -129,29 +159,47 @@ def _validate_invoice(invoice) -> list[str]:
 def _build_correction_section(errors: list[str], attempt: int, max_attempts: int) -> str:
     """Build the correction prompt appendix for retry attempts."""
     bullet_lines = "\n".join(f"  • {e}" for e in errors)
+
+    gstin_errors = [e for e in errors if "gstin" in e.lower() or "gst" in e.lower()]
+    gstin_extra = ""
+    if gstin_errors:
+        gstin_extra = (
+            "\n\n【GSTIN Re-read Procedure】\n"
+            "For each GSTIN error above:\n"
+            "  1. Locate the label 'GSTIN' or 'GST No.' on the invoice image\n"
+            "  2. Place your attention on the 15-character string immediately after the label\n"
+            "  3. Read positions 1-2: should be a 2-digit state code (01–38)\n"
+            "  4. Read positions 3-7: should be 5 uppercase letters (the PAN prefix)\n"
+            "  5. Read positions 8-11: should be 4 digits\n"
+            "  6. Read position 12: should be 1 uppercase letter\n"
+            "  7. Read position 13: usually '1' (entity number)\n"
+            "  8. Read position 14: MUST be the letter 'Z' — if you see '2' you may have misread it\n"
+            "  9. Read position 15: the check character (any alphanumeric)\n"
+            "  10. Cross-check: positions 3-12 (10 chars) should match the PAN if printed on the invoice\n"
+        )
+
     return (
         f"\n\n─── CORRECTION REQUIRED (Attempt {attempt}/{max_attempts}) ───\n"
         f"Your previous extraction had {len(errors)} validation error(s) that must be fixed:\n"
-        f"{bullet_lines}\n\n"
-        "Instructions:\n"
+        f"{bullet_lines}\n"
+        f"{gstin_extra}\n"
+        "General instructions:\n"
         "- Re-examine the invoice image carefully for each flagged field\n"
-        "- For GSTINs: read every character individually — transposing even one letter/digit "
-        "causes tax reconciliation failures\n"
-        "- For vendor_name: copy the COMPLETE legal name exactly as printed, including "
-        "'Private Limited', 'LLP', etc.\n"
+        "- Read every character individually — transposing or dropping even one causes ITC failure\n"
+        "- For vendor_name: copy the COMPLETE legal name including 'Private Limited', 'LLP', etc.\n"
         "- Return the complete corrected JSON (all fields, not just the changed ones)\n"
         "─────────────────────────────────────────────────────────"
     )
 
 
-EXTRACTION_PROMPT = """You are an invoice data extraction system. Extract structured data from this invoice.
+EXTRACTION_PROMPT = """You are a precise invoice data extraction system with vision capability. Extract structured data from this invoice image with extremely high accuracy for compliance-critical fields.
 
 Return ONLY valid JSON with these fields (use null for missing fields):
 {
   "vendor_name": "The company/business that ISSUED this invoice (the seller, not the buyer)",
   "vendor_address": "Full address of the vendor/seller (street, city, state, pincode) or null",
   "buyer_name": "The company/person the invoice is billed TO (the buyer/customer)",
-  "invoice_number": "The invoice/bill number — copy EXACTLY as printed, digit by digit",
+  "invoice_number": "The invoice/bill number — copy EXACTLY as printed, character by character",
   "invoice_date": "Date in YYYY-MM-DD format",
   "due_date": "Due date in YYYY-MM-DD format or null",
   "total_amount": 0.00,
@@ -201,23 +249,128 @@ Return ONLY valid JSON with these fields (use null for missing fields):
   ]
 }
 
-IMPORTANT:
-- invoice_number: copy the invoice/bill number CHARACTER BY CHARACTER exactly as it appears on the document. Do NOT paraphrase, reconstruct, or guess any digit. If the number is long (10+ digits), re-read it carefully before writing. Transposing or dropping a single digit makes ITC reconciliation fail under GST law. After extracting, verify by mentally re-reading the number from the document one more time.
-- vendor_name is the SELLER/ISSUER, not the buyer/customer
-- buyer_gst_number is the GSTIN printed in the "Bill To" / "Billed To" / "Ship To" / "Recipient" / "Customer GSTIN" section of the invoice. Look carefully in the buyer/recipient address block — it is often labelled "GSTIN", "GST No", or "GST Registration No". Extract it even if it appears alongside the buyer address. Do NOT leave this null if a GSTIN is visible in the Bill To section.
-- For amounts, use numeric values without currency symbols or commas
-- Extract CGST, SGST, IGST amounts separately in tax_breakup (look for tax summary table)
-- Extract bank/payment details if present on the invoice (often at the bottom)
-- If this is not an invoice (e.g., receipt, ticket, form), still extract what you can
-- hsn_or_sac: look for columns labelled "HSN", "SAC", "HSN/SAC", "HSN Code", "SAC Code" on every line item row. For Indian service invoices, SAC codes are 6-digit numbers (e.g. 998211, 998314). Extract even if the column header is abbreviated. If no code is printed on a line item, return null for that item.
-- tax_rate: for EACH line item, extract the GST/tax rate percentage from the "Tax Rate", "GST Rate", "Rate %", or "IGST/CGST/SGST %" column. Express as a plain number (e.g. 18 for 18% GST, 9 for 9% CGST). If the line item shows separate CGST+SGST rates, sum them for tax_rate (e.g. CGST 9% + SGST 9% = tax_rate 18). Do NOT leave tax_rate null if a tax rate column or percentage is printed for that line item.
-- confidence_scores: for each key field, rate your confidence 0.0–1.0. Use 1.0 only if the value is unambiguous and clearly printed. Use 0.7–0.9 if the field required inference. Use below 0.7 if the field is partially obscured, ambiguous, or required guessing. invoice_number confidence should be 1.0 only if every digit was clearly legible.
-- vendor_name: copy the COMPLETE legal name exactly as printed, including the entity type suffix such as 'Private Limited', 'Limited', 'LLP', 'Pvt. Ltd.', 'Associates', etc. Never truncate the company name.
-- gst_number and buyer_gst_number: read every character individually — GSTINs are 15 characters, format: 2 digits + 5 uppercase letters + 4 digits + 1 uppercase letter + 1 digit + 'Z' + 1 alphanumeric. Transposing even one character causes GST/ITC reconciliation failures.
-- Return ONLY the JSON object, no other text"""
+═══════════════════════════════════════════════════════
+CRITICAL EXTRACTION RULES — READ CAREFULLY
+═══════════════════════════════════════════════════════
+
+【GSTIN — Compliance Critical】
+A GSTIN is EXACTLY 15 characters in this fixed format:
+  Position 1-2  : 2 digits (state code, e.g. 29, 33, 27, 07)
+  Position 3-7  : 5 UPPERCASE letters (PAN chars 1-5)
+  Position 8-11 : 4 digits (PAN chars 6-9)
+  Position 12   : 1 UPPERCASE letter (PAN char 10)
+  Position 13   : 1 digit or letter (entity number, usually '1')
+  Position 14   : always the letter 'Z'
+  Position 15   : 1 alphanumeric check character
+
+HOW TO READ THE GSTIN FROM THE INVOICE IMAGE:
+  1. Find the label "GSTIN", "GSTIN No.", "GST Reg. No.", "GST No." on the invoice
+  2. The 15 characters immediately following that label are the GSTIN
+  3. Count them: you must have exactly 15 characters
+  4. Read each character individually — do NOT group or skim
+  5. Common OCR confusion pairs to watch for: 0 vs O, 1 vs I vs L, 5 vs S, 8 vs B, 2 vs Z, 6 vs G
+  6. The middle 10 characters (positions 3-12) are the vendor's PAN — if PAN is printed separately, cross-check they match
+  7. Position 14 is ALWAYS the letter 'Z' — if you read something else, re-examine
+  8. Set confidence_scores.gst_number = 1.0 only if every character is clearly legible; use 0.8 if any character required inference
+
+gst_number = vendor/seller GSTIN (usually top-left of invoice, in vendor's letterhead)
+buyer_gst_number = buyer/customer GSTIN (usually in Bill To / Ship To section)
+
+【INVOICE NUMBER — ITC Critical】
+  1. Find the label "Invoice No.", "Invoice Number", "Bill No.", "Ref No.", or "Invoice #"
+  2. Copy the value CHARACTER BY CHARACTER — including all slashes, hyphens, and alphanumerics
+  3. Do NOT paraphrase, reconstruct, or abbreviate
+  4. Common formats: INV/2024-25/047, BCT/2025/0089, KFS-2025-0312, SPT/MAR25/00891
+  5. After extracting, mentally re-read it from the document one more time to verify
+  6. Set confidence_scores.invoice_number = 1.0 only if every character is unambiguous
+
+【LINE ITEMS — Table Extraction】
+  - Scan every row of the line-item table; extract ALL rows (not just the first few)
+  - For each row: description, quantity, unit price, amount, HSN/SAC code, tax rate
+  - HSN/SAC codes: 4-8 digit numbers in "HSN", "SAC", "HSN/SAC" column — extract even if the column is narrow
+  - Do NOT skip rows where the description spans multiple lines — merge them
+  - Tax rows (CGST, SGST, IGST) at the bottom of the table are NOT line items — put their amounts in tax_breakup instead
+
+【AMOUNTS】
+  - Use numeric values only — no ₹ symbols, commas, or spaces
+  - total_amount = the final payable amount including all taxes
+  - subtotal = pre-tax total (before CGST/SGST/IGST)
+  - tax_amount = total tax (CGST+SGST or IGST)
+
+【VENDOR NAME】
+  - Copy the COMPLETE legal name: include "Private Limited", "LLP", "Pvt. Ltd.", etc.
+  - vendor_name = seller/issuer (top of invoice, usually large text in letterhead)
+  - Do NOT use the buyer's company name
+  - The vendor is the party who SIGNED and ISSUED this invoice, not the party it was addressed TO
+
+【CONFIDENCE SCORES】
+  - 1.0 = every character unambiguous and clearly printed
+  - 0.8-0.9 = field required careful reading or minor inference
+  - 0.7 = field partially obscured or required guessing
+  - Below 0.7 = field is unreliable
+
+Return ONLY the JSON object — no markdown, no explanation, no preamble."""
 
 
-def _pdf_to_images(pdf_path: str, dpi: int = 200) -> list[str]:
+_OCR_SUBS: list[tuple[str, str]] = [
+    ("0", "O"), ("O", "0"),
+    ("1", "I"), ("I", "1"),
+    ("1", "L"), ("L", "1"),
+    ("5", "S"), ("S", "5"),
+    ("8", "B"), ("B", "8"),
+    ("2", "Z"), ("Z", "2"),
+    ("6", "G"), ("G", "6"),
+    ("9", "Q"), ("Q", "9"),
+]
+
+
+def _try_fix_gstin(gstin: str) -> str | None:
+    """Single-character OCR substitution search for a valid GSTIN.
+
+    Tries every position × every substitution pair. Returns the first valid
+    GSTIN found, or None if no correction produces a valid checksum.
+    """
+    g = gstin.strip().upper()
+    if len(g) != 15:
+        return None
+    for i, ch in enumerate(g):
+        for src, dst in _OCR_SUBS:
+            if ch == src:
+                candidate = g[:i] + dst + g[i+1:]
+                if _validate_gstin_checksum(candidate):
+                    return candidate
+    return None
+
+
+def _reconstruct_gstin_from_pan(pan: str, state_code: str) -> str | None:
+    """If PAN is valid and state code is known, reconstruct GSTIN with correct check digit.
+
+    GSTIN = state_code(2) + PAN(10) + entity_number(1) + 'Z' + check_char(1)
+    We try entity numbers 1-9 and pick the first that produces a valid checksum.
+    """
+    from app.utils.gstin_utils import validate_pan_format
+    pan = (pan or "").strip().upper()
+    state_code = (state_code or "").strip()
+    if not validate_pan_format(pan) or len(state_code) != 2 or not state_code.isdigit():
+        return None
+    for entity in "1234567890ABCDE":
+        prefix = state_code + pan + entity + "Z"
+        if len(prefix) != 14:
+            continue
+        total = 0
+        for i, ch in enumerate(prefix):
+            val = _GSTIN_CHARS.index(ch) if ch in _GSTIN_CHARS else 0
+            if i % 2 == 1:
+                val *= 2
+            total += val // 36 + val % 36
+        check_idx = (36 - (total % 36)) % 36
+        candidate = prefix + _GSTIN_CHARS[check_idx]
+        if _validate_gstin_checksum(candidate):
+            return candidate
+    return None
+
+
+def _pdf_to_images(pdf_path: str, dpi: int = 300) -> list[str]:
     """Convert PDF pages to temporary PNG images. Returns list of file paths."""
     try:
         from pdf2image import convert_from_path
@@ -233,13 +386,34 @@ def _pdf_to_images(pdf_path: str, dpi: int = 200) -> list[str]:
     return paths
 
 
+def _build_buyer_hint_section(buyer_hint: dict) -> str:
+    """Build a prompt section that tells the AI who the buyer/recipient is.
+
+    Prevents the AI from mistaking the client's name in the Bill-To box for the vendor.
+    """
+    lines = ["", "【BUYER IDENTITY — DO NOT USE AS VENDOR】"]
+    if buyer_hint.get("legal_name"):
+        lines.append(f"  Your client (the bill recipient) is: {buyer_hint['legal_name']}")
+    if buyer_hint.get("gst_number"):
+        lines.append(f"  Their GSTIN: {buyer_hint['gst_number']}")
+    if buyer_hint.get("pan_number"):
+        lines.append(f"  Their PAN: {buyer_hint['pan_number']}")
+    lines += [
+        "  If you see this name or GSTIN in the invoice's 'Bill To', 'Billed To', or address box,",
+        "  that entity is the BUYER — not the vendor.",
+        "  The vendor_name MUST be the other party: the one who issued and signed this invoice.",
+    ]
+    return "\n".join(lines)
+
+
 class LLMParser(InvoiceParser):
     """LLM parser with pluggable providers and vision support."""
 
     def supports(self, file_type: str) -> bool:
         return file_type.lower().lstrip(".") in SUPPORTED_TYPES
 
-    def parse(self, file_path: str, file_type: str) -> Invoice:
+    def parse(self, file_path: str, file_type: str,
+              buyer_hint: dict | None = None) -> Invoice:
         api_key = settings.LLM_API_KEY
         provider_name = settings.LLM_PROVIDER.lower()
         model = settings.LLM_MODEL
@@ -264,12 +438,13 @@ class LLMParser(InvoiceParser):
 
         # Choose strategy: vision (direct images) or text (OCR → LLM)
         if provider.supports_vision():
-            return self._parse_with_vision(provider, file_path, ft, provider_name, model)
+            return self._parse_with_vision(provider, file_path, ft, provider_name, model, buyer_hint)
         else:
-            return self._parse_with_text(provider, file_path, ft, provider_name, model)
+            return self._parse_with_text(provider, file_path, ft, provider_name, model, buyer_hint)
 
     def _parse_with_vision(self, provider, file_path: str, ft: str,
-                           provider_name: str, model: str) -> Invoice:
+                           provider_name: str, model: str,
+                           buyer_hint: dict | None = None) -> Invoice:
         """Send document images directly to the LLM — no OCR needed."""
         tmp_images = []
         try:
@@ -286,11 +461,15 @@ class LLMParser(InvoiceParser):
 
             logger.info("Sending %d image(s) to %s/%s for extraction", len(image_paths), provider_name, model)
 
+            base_prompt = EXTRACTION_PROMPT
+            if buyer_hint:
+                base_prompt += _build_buyer_hint_section(buyer_hint)
+
             last_invoice = None
             last_errors: list[str] = []
 
             for attempt in range(1, MAX_PARSE_ATTEMPTS + 1):
-                prompt = EXTRACTION_PROMPT
+                prompt = base_prompt
                 if attempt > 1 and last_errors:
                     prompt += _build_correction_section(last_errors, attempt, MAX_PARSE_ATTEMPTS)
 
@@ -314,7 +493,38 @@ class LLMParser(InvoiceParser):
                     file_path, attempt, MAX_PARSE_ATTEMPTS, last_errors,
                 )
 
-            # Exhausted retries — return best effort but log clearly
+            # Exhausted retries — attempt auto-correction before stripping GSTINs.
+            if last_invoice is not None:
+                if last_invoice.gst_number and not _validate_gstin_checksum(str(last_invoice.gst_number).strip().upper()):
+                    raw_gstin = str(last_invoice.gst_number).strip().upper()
+                    fixed = _try_fix_gstin(raw_gstin)
+                    if not fixed and last_invoice.pan_number:
+                        # Derive state code from buyer GSTIN or place_of_supply as fallback
+                        state_code = ""
+                        if last_invoice.buyer_gst_number and len(str(last_invoice.buyer_gst_number)) >= 2:
+                            state_code = str(last_invoice.buyer_gst_number)[:2]
+                        elif last_invoice.place_of_supply:
+                            sc = str(last_invoice.place_of_supply).strip()
+                            if sc.isdigit() and len(sc) == 2:
+                                state_code = sc
+                        if state_code:
+                            fixed = _reconstruct_gstin_from_pan(str(last_invoice.pan_number), state_code)
+                    if fixed:
+                        logger.info("Auto-corrected vendor GSTIN '%s' → '%s'", raw_gstin, fixed)
+                        last_invoice.gst_number = fixed
+                    else:
+                        logger.warning("Stripping invalid vendor GSTIN '%s' — no auto-correction found", raw_gstin)
+                        last_invoice.gst_number = None
+
+                if last_invoice.buyer_gst_number and not _validate_gstin_checksum(str(last_invoice.buyer_gst_number).strip().upper()):
+                    raw_bgstin = str(last_invoice.buyer_gst_number).strip().upper()
+                    fixed_b = _try_fix_gstin(raw_bgstin)
+                    if fixed_b:
+                        logger.info("Auto-corrected buyer GSTIN '%s' → '%s'", raw_bgstin, fixed_b)
+                        last_invoice.buyer_gst_number = fixed_b
+                    else:
+                        logger.warning("Stripping invalid buyer GSTIN '%s' — no auto-correction found", raw_bgstin)
+                        last_invoice.buyer_gst_number = None
             logger.error(
                 "Invoice %s failed validation after %d attempts. "
                 "Returning best-effort result. Errors: %s",
@@ -335,7 +545,8 @@ class LLMParser(InvoiceParser):
                     pass
 
     def _parse_with_text(self, provider, file_path: str, ft: str,
-                         provider_name: str, model: str) -> Invoice:
+                         provider_name: str, model: str,
+                         buyer_hint: dict | None = None) -> Invoice:
         """Fallback: OCR → text → LLM (for providers without vision)."""
         from app.parsers.tesseract_parser import TesseractParser
 
@@ -346,7 +557,10 @@ class LLMParser(InvoiceParser):
         if not raw_text.strip():
             raise ParsingError(f"No text extracted from {file_path}")
 
-        base_prompt = EXTRACTION_PROMPT + "\n\nInvoice text:\n" + raw_text[:15000]
+        base_prompt = EXTRACTION_PROMPT
+        if buyer_hint:
+            base_prompt += _build_buyer_hint_section(buyer_hint)
+        base_prompt += "\n\nInvoice text:\n" + raw_text[:15000]
 
         try:
             last_invoice = None
@@ -375,7 +589,38 @@ class LLMParser(InvoiceParser):
                     file_path, attempt, MAX_PARSE_ATTEMPTS, last_errors,
                 )
 
-            # Exhausted retries — return best effort but log clearly
+            # Exhausted retries — attempt auto-correction before stripping GSTINs.
+            if last_invoice is not None:
+                if last_invoice.gst_number and not _validate_gstin_checksum(str(last_invoice.gst_number).strip().upper()):
+                    raw_gstin = str(last_invoice.gst_number).strip().upper()
+                    fixed = _try_fix_gstin(raw_gstin)
+                    if not fixed and last_invoice.pan_number:
+                        # Derive state code from buyer GSTIN or place_of_supply as fallback
+                        state_code = ""
+                        if last_invoice.buyer_gst_number and len(str(last_invoice.buyer_gst_number)) >= 2:
+                            state_code = str(last_invoice.buyer_gst_number)[:2]
+                        elif last_invoice.place_of_supply:
+                            sc = str(last_invoice.place_of_supply).strip()
+                            if sc.isdigit() and len(sc) == 2:
+                                state_code = sc
+                        if state_code:
+                            fixed = _reconstruct_gstin_from_pan(str(last_invoice.pan_number), state_code)
+                    if fixed:
+                        logger.info("Auto-corrected vendor GSTIN '%s' → '%s'", raw_gstin, fixed)
+                        last_invoice.gst_number = fixed
+                    else:
+                        logger.warning("Stripping invalid vendor GSTIN '%s' — no auto-correction found", raw_gstin)
+                        last_invoice.gst_number = None
+
+                if last_invoice.buyer_gst_number and not _validate_gstin_checksum(str(last_invoice.buyer_gst_number).strip().upper()):
+                    raw_bgstin = str(last_invoice.buyer_gst_number).strip().upper()
+                    fixed_b = _try_fix_gstin(raw_bgstin)
+                    if fixed_b:
+                        logger.info("Auto-corrected buyer GSTIN '%s' → '%s'", raw_bgstin, fixed_b)
+                        last_invoice.buyer_gst_number = fixed_b
+                    else:
+                        logger.warning("Stripping invalid buyer GSTIN '%s' — no auto-correction found", raw_bgstin)
+                        last_invoice.buyer_gst_number = None
             logger.error(
                 "Invoice %s failed validation after %d attempts. "
                 "Returning best-effort result. Errors: %s",

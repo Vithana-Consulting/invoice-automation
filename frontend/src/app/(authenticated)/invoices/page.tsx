@@ -8,6 +8,19 @@ import 'ag-grid-community/styles/ag-grid.css';
 import 'ag-grid-community/styles/ag-theme-alpine.css';
 import { api, ApiError } from '@/lib/api';
 import type { ApiResponse, InvoiceDraft, PushResult, ValidationBlock, CompanyBankAccount, InvoicePayment, PaymentSummary, VendorBankDetails } from '@/types';
+
+interface IngestStatus {
+  state: 'never_run' | 'running' | 'stalled' | 'completed' | 'failed';
+  started_at?: string;
+  completed_at?: string;
+  elapsed_seconds?: number;
+  source?: string;
+  emails_found?: number;
+  new_emails?: number;
+  invoices_parsed?: number;
+  drafts_created?: number;
+  error?: string;
+}
 import type { ColDef, CellValueChangedEvent } from 'ag-grid-community';
 import { SubTabs } from '@/components/ui/sub-tabs';
 
@@ -631,11 +644,13 @@ const GLAccountEditor = forwardRef<{ getValue: () => string }, GLAccountEditorPr
   ref,
 ) {
   const [search, setSearch] = useState(value || '');
-  const [committed, setCommitted] = useState<string>(value || '');
+  // Use a ref so getValue() always returns the latest value synchronously,
+  // regardless of React's render timing.
+  const committedRef = useRef<string>(value || '');
   const [highlight, setHighlight] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  useImperativeHandle(ref, () => ({ getValue: () => committed }), [committed]);
+  useImperativeHandle(ref, () => ({ getValue: () => committedRef.current }));
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -650,10 +665,9 @@ const GLAccountEditor = forwardRef<{ getValue: () => string }, GLAccountEditorPr
   }, [options, search]);
 
   const choose = (name: string) => {
-    setCommitted(name);
+    committedRef.current = name;  // synchronous — getValue() reads this immediately
     setSearch(name);
-    // Defer so AG Grid reads via getValue() before tearing the editor down.
-    setTimeout(() => stopEditing(false), 0);
+    stopEditing(false);
   };
 
   const onKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -897,11 +911,23 @@ export default function InvoicesPage() {
   });
 
   const [ingestMessage, setIngestMessage] = useState<{ type: 'success' | 'warning' | 'error'; text: string } | null>(null);
+  const [dismissedIngestKey, setDismissedIngestKey] = useState<string | null>(null);
+
+  const { data: ingestStatusData } = useQuery({
+    queryKey: ['ingest-status'],
+    queryFn: () => api.get<{ status: string; data: IngestStatus }>('/api/ingest/status'),
+    refetchInterval: (query) => {
+      const state = (query.state.data as { data?: IngestStatus } | undefined)?.data?.state;
+      return state === 'running' ? 3000 : false;
+    },
+  });
+  const ingestStatus = ingestStatusData?.data;
 
   const ingestMutation = useMutation({
     mutationFn: () => api.post<{ data: { emails_found?: number; invoices_parsed?: number; drafts_created?: number; pipeline_warnings?: { message: string }[] } }>('/api/ingest/gmail'),
     onSuccess: (res) => {
       queryClient.invalidateQueries({ queryKey: ['drafts'] });
+      queryClient.invalidateQueries({ queryKey: ['ingest-status'] });
       const d = res.data;
       const warnings = d?.pipeline_warnings || [];
       if (warnings.length > 0) {
@@ -910,7 +936,10 @@ export default function InvoicesPage() {
         setIngestMessage({ type: 'success', text: `Ingested ${d?.emails_found || 0} emails, parsed ${d?.invoices_parsed || 0}, created ${d?.drafts_created || 0} drafts.` });
       }
     },
-    onError: (err: Error) => setIngestMessage({ type: 'error', text: err.message }),
+    onError: (err: Error) => {
+      queryClient.invalidateQueries({ queryKey: ['ingest-status'] });
+      setIngestMessage({ type: 'error', text: err.message });
+    },
   });
 
   const editableUnlessPushed = (p: { data: InvoiceDraft }) => p.data?.status !== 'PUSHED';
@@ -1302,6 +1331,59 @@ export default function InvoicesPage() {
           <button onClick={() => setIngestMessage(null)} className="text-xs ml-4 opacity-60 hover:opacity-100">dismiss</button>
         </div>
       )}
+
+      {/* Ingest status banner — persists across page reloads via DB-backed status */}
+      {!ingestMutation.isPending && !ingestMessage && ingestStatus && ingestStatus.state !== 'never_run' && (() => {
+        const s = ingestStatus;
+        const key = s.started_at || '';
+        if (dismissedIngestKey === key) return null;
+
+        if (s.state === 'running') {
+          const elapsed = s.elapsed_seconds || 0;
+          const label = elapsed >= 60 ? `${Math.floor(elapsed / 60)}m ${elapsed % 60}s` : `${elapsed}s`;
+          return (
+            <div className="mb-4 p-3 rounded-lg text-sm flex items-center gap-3 bg-amber-50 text-amber-800 border border-amber-200">
+              <span className="inline-block w-2 h-2 rounded-full bg-amber-500 animate-pulse shrink-0" />
+              <span>Ingestion in progress — fetching emails and parsing invoices (started {label} ago). New drafts will appear automatically when complete.</span>
+            </div>
+          );
+        }
+
+        if (s.state === 'stalled') {
+          const mins = Math.floor((s.elapsed_seconds || 0) / 60);
+          return (
+            <div className="mb-4 p-3 rounded-lg text-sm flex items-center justify-between bg-orange-50 text-orange-700 border border-orange-200">
+              <span>⚠ Ingestion started {mins} min ago but never completed — the server may have restarted. Safe to try again.</span>
+              <button onClick={() => setDismissedIngestKey(key)} className="text-xs ml-4 opacity-60 hover:opacity-100">dismiss</button>
+            </div>
+          );
+        }
+
+        if (s.state === 'completed' && s.completed_at) {
+          const secAgo = Math.floor((Date.now() - new Date(s.completed_at + 'Z').getTime()) / 1000);
+          if (secAgo > 120) return null;
+          const timeLabel = secAgo >= 60 ? `${Math.floor(secAgo / 60)}m ago` : `${secAgo}s ago`;
+          return (
+            <div className="mb-4 p-3 rounded-lg text-sm flex items-center justify-between bg-green-50 text-green-700 border border-green-200">
+              <span>✓ Last ingest: {s.emails_found || 0} emails found · {s.invoices_parsed || 0} invoices parsed · {s.drafts_created || 0} drafts created · {timeLabel}</span>
+              <button onClick={() => setDismissedIngestKey(key)} className="text-xs ml-4 opacity-60 hover:opacity-100">dismiss</button>
+            </div>
+          );
+        }
+
+        if (s.state === 'failed' && s.completed_at) {
+          const secAgo = Math.floor((Date.now() - new Date(s.completed_at + 'Z').getTime()) / 1000);
+          if (secAgo > 120) return null;
+          return (
+            <div className="mb-4 p-3 rounded-lg text-sm flex items-center justify-between bg-red-50 text-red-600 border border-red-200">
+              <span>✗ Last ingest failed: {s.error || 'Unknown error'}</span>
+              <button onClick={() => setDismissedIngestKey(key)} className="text-xs ml-4 opacity-60 hover:opacity-100">dismiss</button>
+            </div>
+          );
+        }
+
+        return null;
+      })()}
 
       {reparseMessage && (
         <div className={`mb-4 p-3 rounded-lg text-sm flex items-center justify-between ${

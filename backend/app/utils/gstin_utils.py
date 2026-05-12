@@ -36,6 +36,34 @@ def extract_state_code(gstin: str) -> str:
 def get_state_name(gstin: str) -> str:
     return STATE_CODES.get(extract_state_code(gstin), "Unknown")
 
+PAN_PATTERN = re.compile(r'^[A-Z]{5}[0-9]{4}[A-Z]$')
+
+
+def validate_pan_format(pan: str) -> bool:
+    if not pan:
+        return False
+    return bool(PAN_PATTERN.match(pan.strip().upper()))
+
+
+def extract_pan_from_gstin(gstin: str) -> str:
+    """GSTIN positions 3-12 (1-indexed) carry the 10-char PAN."""
+    g = (gstin or "").strip().upper()
+    if len(g) < 12:
+        return ""
+    return g[2:12]
+
+
+def gstin_pan_match(gstin: str, pan: str) -> bool:
+    """True if GSTIN's embedded PAN matches the given PAN. Both must be valid format."""
+    if not gstin or not pan:
+        return False
+    if not validate_gstin_format(gstin):
+        return False
+    if not validate_pan_format(pan):
+        return False
+    return extract_pan_from_gstin(gstin) == pan.strip().upper()
+
+
 def is_interstate(vendor_gstin: str, org_state_code: str) -> Optional[bool]:
     """Returns True=IGST, False=CGST+SGST, None=cannot determine."""
     vendor_state = extract_state_code(vendor_gstin)

@@ -1,0 +1,88 @@
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - backend
+      - frontend
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    expose:
+      - "8000"
+    env_file: ./backend/.env.prod
+    environment:
+      DATABASE_URL: mysql+pymysql://accounting:${MYSQL_PASSWORD}@db:3306/accounting_automation
+      FRONTEND_URL: https://${APP_DOMAIN}
+    volumes:
+      - attachments:/app/data/attachments
+      - ./backend/credentials.json:/app/credentials.json:ro
+      - ./backend/token.json:/app/token.json
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    expose:
+      - "3000"
+    environment:
+      NEXT_PUBLIC_API_URL: https://${API_DOMAIN}
+    depends_on:
+      - backend
+
+  db:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: accounting_automation
+      MYSQL_USER: accounting
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    # NOTE: no `ports:` — MySQL stays on the docker network only.
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uaccounting", "-p${MYSQL_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  backup:
+    image: mysql:8.0
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      B2_KEY_ID: ${B2_KEY_ID}
+      B2_APP_KEY: ${B2_APP_KEY}
+      B2_BUCKET: ${B2_BUCKET}
+    volumes:
+      - ./deploy/backup.sh:/usr/local/bin/backup.sh:ro
+      - backup_tmp:/backups
+    entrypoint: ["/bin/sh", "-c"]
+    command: |
+      "apt-get update && apt-get install -y curl python3 python3-pip cron && \
+       pip3 install --break-system-packages b2 && \
+       chmod +x /usr/local/bin/backup.sh && \
+       echo '0 2 * * * /usr/local/bin/backup.sh >> /var/log/backup.log 2>&1' | crontab - && \
+       cron -f"
+
+volumes:
+  mysql_data:
+  attachments:
+  caddy_data:
+  caddy_config:
+  backup_tmp:

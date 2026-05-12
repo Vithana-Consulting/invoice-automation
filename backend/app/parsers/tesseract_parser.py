@@ -285,7 +285,7 @@ class TesseractParser(InvoiceParser):
     def supports(self, file_type: str) -> bool:
         return file_type.lower().lstrip(".") in SUPPORTED_TYPES
 
-    def parse(self, file_path: str, file_type: str) -> Invoice:
+    def parse(self, file_path: str, file_type: str, buyer_hint=None) -> Invoice:
         ft = file_type.lower().lstrip(".")
         if not self.supports(ft):
             raise ParsingError(f"Unsupported file type: {ft}")

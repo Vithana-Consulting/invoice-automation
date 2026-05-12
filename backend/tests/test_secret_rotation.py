@@ -1,4 +1,4 @@
-"""Tests for the SecretRotationManager.
+ """Tests for the SecretRotationManager.
 
 All tests use an in-memory SQLite database — no external dependencies.
 """

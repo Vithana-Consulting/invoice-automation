@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import re
@@ -10,12 +11,13 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.db.repository import InvoiceRepository
+from app.db.repository import AuditLogRepository, InvoiceRepository
 from app.db.session import get_db
-from app.models.db_models import InvoiceRecord
+from app.models.db_models import InvoiceRecord, LegacyAuditLog
 from app.services.draft_service import DraftService
 from app.services.drive_upload import try_drive_upload
 from app.services.invoice_service import InvoiceService
+from app.tenant.context import TenantContext
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -110,6 +112,68 @@ def run_preflight(db: Session = Depends(get_db)):
     return {"status": "success" if result["success"] else "error", "data": result}
 
 
+@router.get("/status")
+def get_ingest_status(db: Session = Depends(get_db)):
+    """Return the last ingest run state for the current company.
+
+    state values:
+      never_run  — no ingestion has ever been triggered
+      running    — started but not yet finished (< 10 min ago)
+      stalled    — started but not finished for > 10 min (server may have restarted)
+      completed  — finished successfully
+      failed     — finished with an error
+    """
+    company_id = TenantContext.get()
+
+    latest_started = (
+        db.query(LegacyAuditLog)
+        .filter(LegacyAuditLog.company_id == company_id,
+                LegacyAuditLog.entity_type == "ingest",
+                LegacyAuditLog.action == "ingest_started")
+        .order_by(LegacyAuditLog.created_at.desc())
+        .first()
+    )
+
+    latest_finished = (
+        db.query(LegacyAuditLog)
+        .filter(LegacyAuditLog.company_id == company_id,
+                LegacyAuditLog.entity_type == "ingest",
+                LegacyAuditLog.action.in_(["ingest_completed", "ingest_failed"]))
+        .order_by(LegacyAuditLog.created_at.desc())
+        .first()
+    )
+
+    if not latest_started:
+        return {"status": "success", "data": {"state": "never_run"}}
+
+    started_at = latest_started.created_at
+    start_details = json.loads(latest_started.details) if latest_started.details else {}
+
+    if not latest_finished or latest_finished.created_at < started_at:
+        elapsed = int((datetime.utcnow() - started_at).total_seconds())
+        state = "running" if elapsed < 600 else "stalled"
+        return {"status": "success", "data": {
+            "state": state,
+            "started_at": started_at.isoformat(),
+            "elapsed_seconds": elapsed,
+            "source": start_details.get("source", "gmail"),
+        }}
+
+    fin_details = json.loads(latest_finished.details) if latest_finished.details else {}
+    state = "completed" if latest_finished.action == "ingest_completed" else "failed"
+    return {"status": "success", "data": {
+        "state": state,
+        "started_at": started_at.isoformat(),
+        "completed_at": latest_finished.created_at.isoformat(),
+        "source": fin_details.get("source", "gmail"),
+        "emails_found": fin_details.get("emails_found", 0),
+        "new_emails": fin_details.get("new_emails", 0),
+        "invoices_parsed": fin_details.get("invoices_parsed", 0),
+        "drafts_created": fin_details.get("drafts_created", 0),
+        "error": fin_details.get("error"),
+    }}
+
+
 @router.post("/{source}")
 def ingest_from_source(source: str, db: Session = Depends(get_db)):
     """Pull invoices from a configured source platform.
@@ -150,8 +214,13 @@ def ingest_from_source(source: str, db: Session = Depends(get_db)):
         )
 
     # ─── Gate 3: Ingest ────────────────────────────────────────
+    audit = AuditLogRepository(db)
+    audit.log(entity_type="ingest", entity_id=0, action="ingest_started", details={"source": source})
+
     try:
         stats = platform.fetch_invoices(db)
+        audit.log(entity_type="ingest", entity_id=0, action="ingest_completed",
+                  details={"source": source, **{k: v for k, v in stats.items() if k != "pipeline_warnings"}})
 
         # Add preflight warnings to response
         if preflight.warnings:
@@ -160,6 +229,8 @@ def ingest_from_source(source: str, db: Session = Depends(get_db)):
         return {"status": "success", "data": stats}
     except Exception as e:
         logger.error("Ingestion from %s failed: %s", source, e)
+        audit.log(entity_type="ingest", entity_id=0, action="ingest_failed",
+                  details={"source": source, "error": str(e)}, status="error")
         raise HTTPException(status_code=500, detail=f"Ingestion failed: {type(e).__name__}")
 
 

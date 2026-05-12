@@ -23,7 +23,7 @@ class LlamaParseParser(InvoiceParser):
     def supports(self, file_type: str) -> bool:
         return file_type.lower().lstrip(".") in SUPPORTED_TYPES
 
-    def parse(self, file_path: str, file_type: str) -> Invoice:
+    def parse(self, file_path: str, file_type: str, buyer_hint=None) -> Invoice:
         if not settings.LLAMAPARSE_API_KEY:
             raise ParsingError(
                 "LLAMAPARSE_API_KEY is not set. Cannot use LlamaParse parser."

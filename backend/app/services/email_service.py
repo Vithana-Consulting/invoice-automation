@@ -98,7 +98,7 @@ class EmailService:
         results = (
             service.users()
             .messages()
-            .list(userId="me", labelIds=[label_id], maxResults=50)
+            .list(userId="me", labelIds=[label_id], maxResults=200)
             .execute()
         )
         messages = results.get("messages", [])

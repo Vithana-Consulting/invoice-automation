@@ -102,7 +102,7 @@ class OpenAIProvider(LLMProvider):
         response = client.chat.completions.create(
             model=self.model,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=2000,
+            max_tokens=4096,
             temperature=0,
             response_format={"type": "json_object"},
         )
@@ -136,7 +136,7 @@ class OpenAIProvider(LLMProvider):
         response = client.chat.completions.create(
             model=self.model,
             messages=[{"role": "user", "content": content}],
-            max_tokens=2000,
+            max_tokens=4096,
             temperature=0,
             response_format={"type": "json_object"},
         )
@@ -156,7 +156,7 @@ class AnthropicProvider(LLMProvider):
         client = anthropic.Anthropic(api_key=self.api_key)
         response = client.messages.create(
             model=self.model,
-            max_tokens=2000,
+            max_tokens=4096,
             messages=[{"role": "user", "content": prompt}],
         )
         return response.content[0].text.strip()
@@ -181,7 +181,7 @@ class AnthropicProvider(LLMProvider):
 
         response = client.messages.create(
             model=self.model,
-            max_tokens=2000,
+            max_tokens=4096,
             messages=[{"role": "user", "content": content}],
         )
         return response.content[0].text.strip()
@@ -201,7 +201,7 @@ class GoogleProvider(LLMProvider):
         response = client.chat.completions.create(
             model=self.model or "gemini-2.0-flash",
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=2000,
+            max_tokens=4096,
             temperature=0,
         )
         return response.choices[0].message.content.strip()
@@ -229,7 +229,7 @@ class GoogleProvider(LLMProvider):
         response = client.chat.completions.create(
             model=self.model or "gemini-2.0-flash",
             messages=[{"role": "user", "content": content}],
-            max_tokens=2000,
+            max_tokens=4096,
             temperature=0,
         )
         return response.choices[0].message.content.strip()
@@ -249,7 +249,7 @@ class OllamaProvider(LLMProvider):
         response = client.chat.completions.create(
             model=self.model or "llama3",
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=2000,
+            max_tokens=4096,
             temperature=0,
         )
         return response.choices[0].message.content.strip()

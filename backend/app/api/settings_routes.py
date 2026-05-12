@@ -77,6 +77,7 @@ async def get_settings(user: User = Depends(get_current_user), db: Session = Dep
                 "id": company.id,
                 "name": company.name,
                 "domain": company.domain,
+                "legal_name": company.legal_name,
                 "gst_number": company.gst_number,
                 "pan_number": company.pan_number,
             }
@@ -114,6 +115,8 @@ async def update_company_settings(body: dict, user: User = Depends(get_current_u
     if not company:
         raise HTTPException(status_code=404, detail="Company not found")
 
+    if "legal_name" in body:
+        company.legal_name = body["legal_name"].strip() or None
     if "gst_number" in body:
         company.gst_number = body["gst_number"].strip().upper() if body["gst_number"] else None
     if "pan_number" in body:
@@ -124,6 +127,7 @@ async def update_company_settings(body: dict, user: User = Depends(get_current_u
     return {
         "status": "success",
         "data": {
+            "legal_name": company.legal_name,
             "gst_number": company.gst_number,
             "pan_number": company.pan_number,
         },

@@ -1,0 +1,41 @@
+# Caddy auto-provisions Let's Encrypt certs for both domains.
+# Set APP_DOMAIN and API_DOMAIN in the shell env before `docker compose up`.
+
+{$APP_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy frontend:3000
+
+	# Security headers
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		# Tighten CSP after verifying nothing breaks
+		# Content-Security-Policy "default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self'"
+		-Server
+	}
+}
+
+{$API_DOMAIN} {
+	encode zstd gzip
+
+	# Cap upload size to invoice PDFs only — adjust if needed
+	request_body {
+		max_size 25MB
+	}
+
+	reverse_proxy backend:8000 {
+		# Forward real client IP for audit logs
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+}

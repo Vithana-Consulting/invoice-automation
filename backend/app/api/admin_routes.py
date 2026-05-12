@@ -23,7 +23,7 @@ from app.config import (
 from app.core.secret_rotation import RotationError, rotation_manager, ROTATABLE_KEYS
 from app.db.session import get_db
 from app.models.db_models import (
-    AuditLog, ChartOfAccount, Company, CompanyMember, Integration,
+    AuditLog, ChartOfAccount, Company, CompanyMember, ExtractionLog, Integration,
     InvoiceDraft, InvoiceRecord, PlatformVendor,
     ProcessedEmail, Rule, User, VendorCache, VendorMapping,
 )
@@ -36,12 +36,12 @@ router = APIRouter()
 FLUSH_TABLES = [
     "invoice_payments",      # must come before invoice_drafts (FK)
     "invoice_drafts",
+    "extraction_logs",       # must come before invoices (FK)
     "invoices",
     "company_bank_accounts",
     "processed_emails",
     "vendor_cache",
     "audit_log",
-    "rules",
     "vendor_mappings",
     "platform_vendors",
 ]
@@ -233,7 +233,7 @@ def delete_company(company_id: int, db: Session = Depends(get_db)):
         logger.warning("Failed to drop views for company %d: %s", company_id, e)
 
     # Delete all tenant-scoped data (FK-safe order)
-    for model in [InvoiceDraft, InvoiceRecord, ProcessedEmail, VendorCache,
+    for model in [InvoiceDraft, ExtractionLog, InvoiceRecord, ProcessedEmail, VendorCache,
                   AuditLog, Rule, VendorMapping, PlatformVendor,
                   ChartOfAccount, Integration, CompanyMember]:
         db.query(model).filter(model.company_id == company_id).delete()

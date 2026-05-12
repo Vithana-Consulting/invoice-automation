@@ -69,9 +69,27 @@ class InvoiceService:
         parser = get_parser()
         logger.info("Parsing invoice %d (%s) with %s", invoice_id, record.file_name, settings.PARSER_MODE)
 
+        # Build buyer hint so the AI never mistakes our company for the vendor
+        buyer_hint = None
+        try:
+            from app.models.db_models import Company
+            from app.tenant.context import TenantContext
+            cid = TenantContext.get_optional()
+            if cid:
+                company = self.db.query(Company).filter(Company.id == cid).first()
+                if company and (company.legal_name or company.gst_number or company.pan_number):
+                    buyer_hint = {
+                        "legal_name": company.legal_name or company.name,
+                        "gst_number": company.gst_number,
+                        "pan_number": company.pan_number,
+                    }
+        except Exception:
+            pass  # best-effort — never block parsing
+
         raw_parsed_data: dict = {}
         try:
-            invoice = parser.parse(record.file_path, record.file_type or "pdf")
+            invoice = parser.parse(record.file_path, record.file_type or "pdf",
+                                   buyer_hint=buyer_hint)
             # Capture raw parsed data for ExtractionLog (best-effort)
             try:
                 raw_parsed_data = invoice.model_dump()

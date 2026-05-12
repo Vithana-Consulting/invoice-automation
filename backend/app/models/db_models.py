@@ -55,6 +55,7 @@ class Company(Base):
     name = Column(String(255), nullable=False)
     slug = Column(String(100), unique=True, nullable=False)
     domain = Column(String(255), unique=True, nullable=True, index=True)  # email domain → company lookup
+    legal_name = Column(String(500), nullable=True)  # Full legal name (e.g. "ACME PRIVATE LIMITED") — used as buyer hint in parser
     gst_number = Column(String(20), nullable=True)  # Company's GSTIN for invoice validation
     pan_number = Column(String(15), nullable=True)  # Company's PAN for invoice validation
     is_active = Column(Boolean, default=True)
