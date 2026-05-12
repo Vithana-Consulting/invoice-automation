@@ -128,15 +128,14 @@ class SystemConfigManager:
         try:
             with db_session() as db:
                 records = db.query(SystemConfig).all()
-                db_values = {r.key: r for r in records}
+                db_values = {r.key: r.value for r in records}
         except Exception as exc:
             logger.warning("Failed to load system config list from DB: %s", exc)
             db_values = {}
 
         result = []
         for key in sorted(SYSTEM_KEYS):
-            db_record = db_values.get(key)
-            value = db_record.value if db_record and db_record.value else ""
+            value = db_values.get(key) or ""
             is_secret = key in SECRET_SYSTEM_KEYS
             is_set = bool(value)
 
