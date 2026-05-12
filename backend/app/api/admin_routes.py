@@ -23,8 +23,9 @@ from app.config import (
 from app.core.secret_rotation import RotationError, rotation_manager, ROTATABLE_KEYS
 from app.db.session import get_db
 from app.models.db_models import (
-    AuditLog, ChartOfAccount, Company, CompanyMember, ExtractionLog, Integration,
-    InvoiceDraft, InvoiceRecord, PlatformVendor,
+    AuditLog, ChartOfAccount, Company, CompanyBankAccount, CompanyMember,
+    ExtractionLog, Integration, InvoiceDraft, InvoicePayment, InvoiceRecord,
+    LegacyAuditLog, PlatformTdsTax, PlatformVendor,
     ProcessedEmail, Rule, User, VendorCache, VendorMapping,
 )
 from app.platforms.base import decrypt_config, encrypt_config
@@ -233,9 +234,24 @@ def delete_company(company_id: int, db: Session = Depends(get_db)):
         logger.warning("Failed to drop views for company %d: %s", company_id, e)
 
     # Delete all tenant-scoped data (FK-safe order)
-    for model in [InvoiceDraft, ExtractionLog, InvoiceRecord, ProcessedEmail, VendorCache,
-                  AuditLog, Rule, VendorMapping, PlatformVendor,
-                  ChartOfAccount, Integration, CompanyMember]:
+    for model in [
+        InvoicePayment,      # references invoice_drafts + company_bank_accounts
+        InvoiceDraft,        # references invoices
+        ExtractionLog,       # references invoices
+        InvoiceRecord,
+        CompanyBankAccount,
+        ProcessedEmail,
+        VendorCache,
+        AuditLog,
+        LegacyAuditLog,
+        Rule,
+        VendorMapping,
+        PlatformVendor,
+        PlatformTdsTax,
+        ChartOfAccount,
+        Integration,
+        CompanyMember,
+    ]:
         db.query(model).filter(model.company_id == company_id).delete()
 
     # Delete company
