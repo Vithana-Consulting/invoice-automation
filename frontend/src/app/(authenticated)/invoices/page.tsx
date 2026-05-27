@@ -1,6 +1,6 @@
 'use client';
 
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactDOM from 'react-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { AgGridReact } from 'ag-grid-react';
@@ -630,92 +630,133 @@ function BankField({ label, value, raw }: { label: string; value?: string | null
   );
 }
 
-// AG Grid custom editor: typeahead over the COA list for the GL Account column.
-// Wired via cellEditor: GLAccountEditor + cellEditorPopup: true so the dropdown
-// can overflow the row. Returns the chosen account name; the page-level
-// onCellValueChanged translates name → account_id before PUT.
-type GLAccountEditorProps = {
-  value: string | null;
-  options: string[];
-  stopEditing: (cancel?: boolean) => void;
+type GLAccountSelectProps = {
+  accounts: Array<{ id: number; name: string }>;
+  currentId: number | null;
+  currentName: string | null;
+  disabled: boolean;
+  onChange: (accountId: number | null) => void;
 };
-const GLAccountEditor = forwardRef<{ getValue: () => string }, GLAccountEditorProps>(function GLAccountEditor(
-  { value, options, stopEditing },
-  ref,
-) {
-  const [search, setSearch] = useState(value || '');
-  // Use a ref so getValue() always returns the latest value synchronously,
-  // regardless of React's render timing.
-  const committedRef = useRef<string>(value || '');
+function GLAccountSelect({ accounts, currentId, currentName, disabled, onChange }: GLAccountSelectProps) {
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState('');
   const [highlight, setHighlight] = useState(0);
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-
-  useImperativeHandle(ref, () => ({ getValue: () => committedRef.current }));
-
-  useEffect(() => {
-    inputRef.current?.focus();
-    inputRef.current?.select();
-  }, []);
+  const [pos, setPos] = useState<{ top: number; left: number; width: number } | null>(null);
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
-    const list = options.filter((n) => n && n.toLowerCase().includes(q));
-    if (!q) return ['', ...list].slice(0, 200);
-    return list.slice(0, 200);
-  }, [options, search]);
+    if (!q) return accounts;
+    return accounts.filter((a) => a.name.toLowerCase().includes(q));
+  }, [accounts, search]);
 
-  const choose = (name: string) => {
-    committedRef.current = name;  // synchronous — getValue() reads this immediately
-    setSearch(name);
-    stopEditing(false);
+  useEffect(() => {
+    if (!open) return;
+    const r = triggerRef.current?.getBoundingClientRect();
+    if (r) setPos({ top: r.bottom + 4, left: r.left, width: Math.max(r.width, 320) });
+    setSearch('');
+    setHighlight(0);
+    const t = setTimeout(() => inputRef.current?.focus(), 0);
+    return () => clearTimeout(t);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDocDown = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (triggerRef.current?.contains(t)) return;
+      const menu = document.getElementById('gl-select-menu');
+      if (menu && menu.contains(t)) return;
+      setOpen(false);
+    };
+    document.addEventListener('mousedown', onDocDown);
+    return () => document.removeEventListener('mousedown', onDocDown);
+  }, [open]);
+
+  const choose = (id: number | null) => {
+    onChange(id);
+    setOpen(false);
   };
 
-  const onKey = (e: React.KeyboardEvent<HTMLInputElement>) => {
+  const onKey = (e: React.KeyboardEvent) => {
     if (e.key === 'ArrowDown') {
       e.preventDefault();
-      setHighlight((h) => Math.min(h + 1, filtered.length - 1));
+      setHighlight((h) => Math.min(h + 1, filtered.length));
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
       setHighlight((h) => Math.max(h - 1, 0));
     } else if (e.key === 'Enter') {
       e.preventDefault();
-      const pick = filtered[highlight];
-      if (pick !== undefined) choose(pick);
+      if (highlight === 0) choose(null);
+      else {
+        const pick = filtered[highlight - 1];
+        if (pick) choose(pick.id);
+      }
     } else if (e.key === 'Escape') {
       e.preventDefault();
-      stopEditing(true);
+      setOpen(false);
     }
   };
 
+  const label = currentName || (currentId ? accounts.find((a) => a.id === currentId)?.name : null);
+
   return (
-    <div className="bg-white border border-gray-300 shadow-lg rounded-md w-72">
-      <input
-        ref={inputRef}
-        value={search}
-        onChange={(e) => { setSearch(e.target.value); setHighlight(0); }}
-        onKeyDown={onKey}
-        placeholder="Search GL account..."
-        className="w-full px-3 py-2 text-sm border-b border-gray-200 outline-none"
-      />
-      <ul className="max-h-64 overflow-y-auto py-1 text-sm">
-        {filtered.length === 0 ? (
-          <li className="px-3 py-2 text-gray-400 italic">No matches</li>
-        ) : (
-          filtered.map((name, i) => (
+    <>
+      <button
+        ref={triggerRef}
+        type="button"
+        disabled={disabled}
+        onClick={(e) => { e.stopPropagation(); setOpen((o) => !o); }}
+        className={`w-full text-left text-sm px-1 py-0.5 rounded truncate ${disabled ? 'text-gray-400' : 'hover:bg-gray-100'}`}
+        title={label || ''}
+      >
+        {label || <span className="text-gray-400 italic">—</span>}
+      </button>
+      {open && pos && ReactDOM.createPortal(
+        <div
+          id="gl-select-menu"
+          style={{ position: 'fixed', top: pos.top, left: pos.left, width: pos.width, zIndex: 9999 }}
+          className="bg-white border border-gray-300 shadow-lg rounded-md"
+          onMouseDown={(e) => e.stopPropagation()}
+        >
+          <input
+            ref={inputRef}
+            value={search}
+            onChange={(e) => { setSearch(e.target.value); setHighlight(0); }}
+            onKeyDown={onKey}
+            placeholder="Search GL account..."
+            className="w-full px-3 py-2 text-sm border-b border-gray-200 outline-none"
+          />
+          <ul className="max-h-72 overflow-y-auto py-1 text-sm">
             <li
-              key={name || '__empty__'}
-              onMouseDown={(e) => { e.preventDefault(); choose(name); }}
-              onMouseEnter={() => setHighlight(i)}
-              className={`px-3 py-1.5 cursor-pointer ${i === highlight ? 'bg-primary-50 text-primary-700' : 'hover:bg-gray-50'}`}
+              onClick={() => choose(null)}
+              onMouseEnter={() => setHighlight(0)}
+              className={`px-3 py-1.5 cursor-pointer italic text-gray-400 ${highlight === 0 ? 'bg-primary-50' : 'hover:bg-gray-50'}`}
             >
-              {name || <span className="text-gray-400 italic">— clear —</span>}
+              — clear —
             </li>
-          ))
-        )}
-      </ul>
-    </div>
+            {filtered.length === 0 ? (
+              <li className="px-3 py-2 text-gray-400 italic">No matches</li>
+            ) : (
+              filtered.map((a, i) => (
+                <li
+                  key={a.id}
+                  onClick={() => choose(a.id)}
+                  onMouseEnter={() => setHighlight(i + 1)}
+                  className={`px-3 py-1.5 cursor-pointer ${i + 1 === highlight ? 'bg-primary-50 text-primary-700' : 'hover:bg-gray-50'}`}
+                >
+                  {a.name}
+                </li>
+              ))
+            )}
+          </ul>
+        </div>,
+        document.body,
+      )}
+    </>
   );
-});
+}
 
 export default function InvoicesPage() {
   const gridRef = useRef<AgGridReact>(null);
@@ -750,11 +791,13 @@ export default function InvoicesPage() {
   // make AG Grid rebuild columns and drop in-flight edits).
   const coaOptionsRef = useRef<string[]>(['']);
   const coaNameToIdRef = useRef<Map<string, number>>(new Map());
+  const coaAccountsRef = useRef<Array<{ id: number; name: string }>>([]);
   useEffect(() => {
     coaOptionsRef.current = ['', ...coaAccounts.map((a) => a.name)];
     const m = new Map<string, number>();
     for (const a of coaAccounts) m.set(a.name, a.id);
     coaNameToIdRef.current = m;
+    coaAccountsRef.current = coaAccounts;
   }, [coaAccounts]);
 
   const allDrafts = data?.data || [];
@@ -770,6 +813,8 @@ export default function InvoicesPage() {
       api.put(`/api/drafts/${id}`, body),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['drafts'] }),
   });
+  const updateMutationRef = useRef(updateMutation);
+  updateMutationRef.current = updateMutation;
 
   const approveMutation = useMutation({
     mutationFn: (id: number) => api.post(`/api/drafts/${id}/approve`),
@@ -1001,11 +1046,20 @@ export default function InvoicesPage() {
     {
       field: 'account_name',
       headerName: 'GL Account',
-      width: 220,
-      editable: editableUnlessPushed,
-      cellEditor: GLAccountEditor,
-      cellEditorPopup: true,
-      cellEditorParams: () => ({ options: coaOptionsRef.current }),
+      width: 240,
+      cellRenderer: (p: { data: InvoiceDraft }) => {
+        const draft = p.data;
+        if (!draft) return null;
+        return (
+          <GLAccountSelect
+            accounts={coaAccountsRef.current}
+            currentId={draft.account_id ?? null}
+            currentName={draft.account_name ?? null}
+            disabled={draft.status === 'PUSHED'}
+            onChange={(id) => updateMutationRef.current.mutate({ id: draft.id, body: { account_id: id } })}
+          />
+        );
+      },
     },
     {
       field: 'tax_breakup',
