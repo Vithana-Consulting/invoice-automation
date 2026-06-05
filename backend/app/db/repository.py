@@ -13,9 +13,11 @@ import logging
 from datetime import datetime
 from typing import List, Optional
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models.db_models import (
+    AdhocInvoiceUpload,
     AuditLog,
     ChartOfAccount,
     Company,
@@ -115,7 +117,58 @@ class InvoiceRepository(TenantBaseRepository):
         return self._get_by_id(invoice_id)
 
     def get_by_content_hash(self, content_hash: str) -> Optional[InvoiceRecord]:
+        # Tenant-scoped — correct against the per-tenant unique constraint
+        # uq_invoices_company_content_hash (the same file may legitimately exist
+        # under a different company).
         return self._base_query().filter(InvoiceRecord.content_hash == content_hash).first()
+
+    def find_logical_duplicates(
+        self, vendor_name: str, invoice_number: str, exclude_invoice_id: int
+    ) -> List[InvoiceRecord]:
+        """Find prior invoices that look like the SAME logical invoice.
+
+        Byte-level dedup (content_hash) misses re-scanned/re-saved copies. This
+        compares a normalized invoice_number (case + separator insensitive) within
+        the tenant, then refines on a loose vendor match in Python. Returns [] when
+        no invoice_number is available (the date+amount fallback is handled at
+        push-time by DuplicateBillValidator). Warning-only signal — never blocks.
+        """
+        from app.services.dedup import normalize_invoice_number, normalize_vendor
+
+        norm_inv = normalize_invoice_number(invoice_number)
+        if not norm_inv:
+            return []
+        norm_vendor = normalize_vendor(vendor_name)
+
+        # Normalize invoice_number in SQL (TRIM + strip space/'-'/'/'+ UPPER) so the
+        # coarse filter matches separator/case variants. Bound params only (std #1).
+        norm_col = func.upper(
+            func.replace(
+                func.replace(
+                    func.replace(func.trim(InvoiceRecord.invoice_number), " ", ""),
+                    "-", "",
+                ),
+                "/", "",
+            )
+        )
+        candidates = (
+            self._base_query()
+            .filter(
+                InvoiceRecord.invoice_number.isnot(None),
+                InvoiceRecord.id != exclude_invoice_id,
+                norm_col == norm_inv,
+            )
+            .limit(5000)  # std #6 — list queries bounded
+            .all()
+        )
+
+        # Refine: same vendor (loosely — equal, substring either way, or blank).
+        matches = []
+        for c in candidates:
+            cv = normalize_vendor(c.vendor_name)
+            if not norm_vendor or not cv or norm_vendor == cv or norm_vendor in cv or cv in norm_vendor:
+                matches.append(c)
+        return matches
 
     def update_parsed(self, invoice_id: int, invoice, parser_mode: str):
         """Save parsed invoice data to the record."""
@@ -153,6 +206,31 @@ class InvoiceRepository(TenantBaseRepository):
         if parsing_status:
             query = query.filter(InvoiceRecord.parsing_status == parsing_status)
         return query.order_by(InvoiceRecord.created_at.desc()).offset(offset).limit(limit).all()
+
+
+class AdhocUploadRepository(TenantBaseRepository):
+    """Ad-hoc manual invoice uploads — separate from the Gmail pipeline."""
+    model = AdhocInvoiceUpload
+
+    def create(self, record: AdhocInvoiceUpload) -> AdhocInvoiceUpload:
+        return self._create(record)
+
+    def get_by_id(self, upload_id: int) -> Optional[AdhocInvoiceUpload]:
+        return self._get_by_id(upload_id)
+
+    def get_by_content_hash(self, content_hash: str) -> Optional[AdhocInvoiceUpload]:
+        return self._base_query().filter(AdhocInvoiceUpload.content_hash == content_hash).first()
+
+    def list_all(self, limit: int = 500, offset: int = 0) -> List[AdhocInvoiceUpload]:
+        limit = min(max(limit, 1), 5000)  # std #6 — bounded
+        return (
+            self._base_query()
+            .order_by(AdhocInvoiceUpload.created_at.desc())
+            .offset(offset).limit(limit).all()
+        )
+
+    def delete(self, upload_id: int) -> bool:
+        return self._delete(upload_id)
 
 
 class VendorCacheRepository(TenantBaseRepository):

@@ -1,21 +1,15 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
-import os
-import re
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from app.config import settings
 from app.db.repository import AuditLogRepository, InvoiceRepository
 from app.db.session import get_db
-from app.models.db_models import InvoiceRecord, LegacyAuditLog
-from app.services.draft_service import DraftService
-from app.services.drive_upload import try_drive_upload
+from app.models.db_models import LegacyAuditLog
 from app.services.invoice_service import InvoiceService
 from app.tenant.context import TenantContext
 
@@ -234,68 +228,7 @@ def ingest_from_source(source: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"Ingestion failed: {type(e).__name__}")
 
 
-ALLOWED_UPLOAD_TYPES = {"application/pdf", "image/jpeg", "image/png", "image/tiff", "image/bmp"}
-ALLOWED_EXTENSIONS = {"pdf", "jpg", "jpeg", "png", "tiff", "tif", "bmp"}
-
-
-@router.post("/upload/file")
-async def ingest_upload(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    """Upload a file directly, parse it, and create a draft."""
-    # Validate file type
-    ext = (file.filename or "").rsplit(".", 1)[-1].lower()
-    if ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(status_code=400, detail=f"Unsupported file type: .{ext}. Allowed: {', '.join(ALLOWED_EXTENSIONS)}")
-
-    safe_name = re.sub(r'[^a-zA-Z0-9._-]', '_', file.filename or 'upload')
-    os.makedirs(settings.ATTACHMENT_DIR, exist_ok=True)
-    file_path = os.path.join(
-        settings.ATTACHMENT_DIR,
-        f"upload_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{safe_name}",
-    )
-
-    content = await file.read()
-    with open(file_path, "wb") as f:
-        f.write(content)
-
-    content_hash = hashlib.sha256(content).hexdigest()
-
-    invoice_repo = InvoiceRepository(db)
-    existing = invoice_repo.get_by_content_hash(content_hash)
-    if existing:
-        return {
-            "status": "success",
-            "message": "Duplicate file detected",
-            "data": {"invoice_id": existing.id, "duplicate": True},
-        }
-
-    ext = os.path.splitext(file.filename)[1].lower().lstrip(".")
-    invoice_record = InvoiceRecord(
-        file_path=file_path,
-        file_name=file.filename,
-        file_type=ext,
-        content_hash=content_hash,
-        parsing_status="PENDING",
-        source="manual_upload",
-    )
-    invoice_record = invoice_repo.create(invoice_record)
-
-    drive_file_id = try_drive_upload(file_path, invoice_record, db)
-    if drive_file_id:
-        invoice_repo._update(invoice_record.id, drive_file_id=drive_file_id)
-
-    invoice_service = InvoiceService(db)
-    parsed = invoice_service.parse_invoice(invoice_record.id)
-
-    draft = None
-    if parsed:
-        draft_service = DraftService(db)
-        draft = draft_service.create_draft_from_invoice(invoice_record.id, source="manual_upload")
-
-    return {
-        "status": "success",
-        "data": {
-            "invoice_id": invoice_record.id,
-            "parsed": parsed,
-            "draft_id": draft.id if draft else None,
-        },
-    }
+# NOTE: the former POST /api/ingest/upload/file endpoint was removed. Ad-hoc
+# manual uploads now go through /api/adhoc/* (app/api/adhoc_routes.py), which
+# parse into a separate table without touching invoices/invoice_drafts and
+# without holding a DB connection across the LLM parse.

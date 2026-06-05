@@ -207,7 +207,7 @@ class TestDbSession:
 
 class TestPoolSettings:
     def test_pool_settings_for_mysql(self):
-        """MySQL URL must produce the Cloud-Run-safe pool settings."""
+        """MySQL URL must produce a pool with an 18-connection ceiling and 10s timeout."""
         from app.db.session import _build_engine
 
         with patch("app.db.session.create_engine") as mock_create:
@@ -223,10 +223,12 @@ class TestPoolSettings:
 
         mock_create.assert_called_once()
         _, kwargs = mock_create.call_args
-        assert kwargs["pool_size"] == 2
-        assert kwargs["max_overflow"] == 3
+        assert kwargs["pool_size"] == 6
+        assert kwargs["max_overflow"] == 12
+        # pool_size + max_overflow is the hard ceiling on connections
+        assert kwargs["pool_size"] + kwargs["max_overflow"] == 18
         assert kwargs["pool_recycle"] == 300
-        assert kwargs["pool_timeout"] == 30
+        assert kwargs["pool_timeout"] == 10
         assert kwargs["pool_pre_ping"] is True
 
     def test_pool_settings_for_sqlite_memory(self):

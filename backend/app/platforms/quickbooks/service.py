@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
@@ -9,6 +10,28 @@ from app.platforms.base import BillingPlatform, register_billing
 from app.platforms.quickbooks.client import QuickBooksAuth, QuickBooksClient
 
 logger = logging.getLogger(__name__)
+
+# QuickBooks DocNumber has a hard 21-character limit (Intuit Bill API spec).
+QBO_DOC_NUMBER_MAX = 21
+
+
+def _to_qbo_date(date_str: Optional[str]) -> Optional[str]:
+    """Normalize a stored date string to QBO's required ``YYYY-MM-DD`` format.
+
+    QuickBooks Date fields (TxnDate, DueDate) must be ISO-8601 dates. Drafts may
+    carry dates as ``YYYY-MM-DD`` or ``DD/MM/YYYY`` (India convention) depending
+    on what the parser extracted, so normalize before sending. Returns None when
+    the value is empty or unparseable (caller then omits the field).
+    """
+    if not date_str:
+        return None
+    s = str(date_str).strip()
+    if re.match(r"\d{4}-\d{2}-\d{2}$", s):
+        return s
+    m = re.match(r"(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})$", s)
+    if m:
+        return f"{m.group(3)}-{m.group(2).zfill(2)}-{m.group(1).zfill(2)}"
+    return None
 
 
 @register_billing
@@ -70,50 +93,83 @@ class QuickBooksBilling(BillingPlatform):
         from app.platforms.account_resolver import resolve_accounts_for_platform
         accounts = resolve_accounts_for_platform(draft, "quickbooks", db)
 
-        main_account_ref = accounts.main_account_ref or "1"  # fallback to QB default
+        payload = self.build_bill_payload(draft, vendor_ref, accounts)
+
+        result = self.client.create_bill(payload)
+        bill = result.get("Bill", {})
+        return {"external_id": str(bill.get("Id", "")), "platform": "quickbooks"}
+
+    def build_bill_payload(self, draft: Any, vendor_ref: str,
+                           accounts: Any) -> Dict[str, Any]:
+        """Build the QBO create-bill payload from a draft + resolved accounts.
+
+        Pure (no DB/network) so it is unit-testable. The core invariant it
+        guarantees: the bill's Line amounts always sum to the invoice total —
+        QBO derives TotalAmt from that sum, so any drift would post a wrong total.
+        """
+        main_account_ref = accounts.main_account_ref
+        if not main_account_ref:
+            # Never silently post to an arbitrary account — that books the bill to
+            # the wrong GL. Fail loudly so the operator assigns/configures one.
+            raise Exception(
+                "No expense account resolved for this bill on QuickBooks. Assign a "
+                "GL account on the draft, or configure a default PURCHASE account "
+                "in Chart of Accounts, before pushing."
+            )
         amount = float(draft.total_amount) if draft.total_amount else 0.0
 
-        # Subtract tax from main line if we're creating separate tax lines
-        main_amount = amount
-        if accounts.has_tax_lines:
-            main_amount = amount - accounts.cgst_amount - accounts.sgst_amount - accounts.igst_amount
+        # Build separate GST input lines. QBO derives the bill TotalAmt as the sum
+        # of all lines, so the main expense line must equal (total − tax we
+        # actually post). A tax component is emitted as its own line only when BOTH
+        # its amount AND its resolved COA account exist; otherwise it stays folded
+        # into the main line so the bill still reconciles to the invoice total
+        # (rather than understating it, which was the prior bug).
+        tax_lines = []
+        emitted_tax = 0.0
+        for amount_attr, ref_attr, label in (
+            ("cgst_amount", "cgst_account_ref", "CGST"),
+            ("sgst_amount", "sgst_account_ref", "SGST"),
+            ("igst_amount", "igst_account_ref", "IGST"),
+        ):
+            tax_amt = getattr(accounts, amount_attr) or 0
+            tax_ref = getattr(accounts, ref_attr)
+            if tax_amt and tax_ref:
+                rounded = round(float(tax_amt), 2)
+                tax_lines.append({
+                    "Amount": rounded,
+                    "DetailType": "AccountBasedExpenseLineDetail",
+                    "AccountBasedExpenseLineDetail": {"AccountRef": {"value": tax_ref}},
+                    "Description": label,
+                })
+                emitted_tax += rounded
+            elif tax_amt and not tax_ref:
+                logger.warning(
+                    "[QBO] %s amount %.2f present but no COA tax account resolved "
+                    "for QuickBooks — folding it into the main expense line so the "
+                    "bill reconciles. Configure a default %s account in Chart of "
+                    "Accounts to post it separately.",
+                    label, float(tax_amt), label,
+                )
+
+        main_amount = round(amount - emitted_tax, 2)
 
         lines = [{
-            "Amount": round(main_amount, 2),
+            "Amount": main_amount,
             "DetailType": "AccountBasedExpenseLineDetail",
             "AccountBasedExpenseLineDetail": {
                 "AccountRef": {"value": main_account_ref},
             },
             "Description": f"Invoice {draft.invoice_number or draft.id}",
         }]
+        lines.extend(tax_lines)
 
-        # Add separate tax lines
-        if accounts.cgst_amount and accounts.cgst_account_ref:
-            lines.append({
-                "Amount": round(accounts.cgst_amount, 2),
-                "DetailType": "AccountBasedExpenseLineDetail",
-                "AccountBasedExpenseLineDetail": {"AccountRef": {"value": accounts.cgst_account_ref}},
-                "Description": "CGST",
-            })
-        if accounts.sgst_amount and accounts.sgst_account_ref:
-            lines.append({
-                "Amount": round(accounts.sgst_amount, 2),
-                "DetailType": "AccountBasedExpenseLineDetail",
-                "AccountBasedExpenseLineDetail": {"AccountRef": {"value": accounts.sgst_account_ref}},
-                "Description": "SGST",
-            })
-        if accounts.igst_amount and accounts.igst_account_ref:
-            lines.append({
-                "Amount": round(accounts.igst_amount, 2),
-                "DetailType": "AccountBasedExpenseLineDetail",
-                "AccountBasedExpenseLineDetail": {"AccountRef": {"value": accounts.igst_account_ref}},
-                "Description": "IGST",
-            })
+        # DocNumber is capped at 21 chars by QBO — truncate to avoid a push failure.
+        doc_number = (draft.invoice_number or f"BILL-{draft.id}")[:QBO_DOC_NUMBER_MAX]
 
         payload = {
             "VendorRef": {"value": vendor_ref},
             "Line": lines,
-            "DocNumber": draft.invoice_number or f"BILL-{draft.id}",
+            "DocNumber": doc_number,
         }
 
         # Currency handling per QBO API spec:
@@ -139,14 +195,14 @@ class QuickBooksBilling(BillingPlatform):
                 )
             payload["ExchangeRate"] = float(exchange_rate)
 
-        if draft.invoice_date:
-            payload["TxnDate"] = draft.invoice_date
-        if draft.due_date:
-            payload["DueDate"] = draft.due_date
+        txn_date = _to_qbo_date(draft.invoice_date)
+        if txn_date:
+            payload["TxnDate"] = txn_date
+        due_date = _to_qbo_date(draft.due_date)
+        if due_date:
+            payload["DueDate"] = due_date
 
-        result = self.client.create_bill(payload)
-        bill = result.get("Bill", {})
-        return {"external_id": str(bill.get("Id", "")), "platform": "quickbooks"}
+        return payload
 
     def list_accounts(self) -> List[Dict[str, Any]]:
         """Fetch Chart of Accounts from QuickBooks Online."""

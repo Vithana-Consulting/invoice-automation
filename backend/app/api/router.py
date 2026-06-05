@@ -14,6 +14,7 @@ from app.api.rule_routes import router as rule_router
 from app.api.vendor_mapping_routes import router as vendor_mapping_router
 from app.api.integration_routes import router as integration_router
 from app.api.ingest_routes import router as ingest_router
+from app.api.adhoc_routes import router as adhoc_router
 from app.api.dashboard_routes import router as dashboard_router
 from app.api.admin_routes import router as admin_router
 from app.api.settings_routes import router as settings_router
@@ -36,6 +37,7 @@ api_router.include_router(vendor_mapping_router, prefix="/api/vendor-mappings", 
 api_router.include_router(vendor_router, prefix="/api/vendors", tags=["vendors"])
 api_router.include_router(integration_router, prefix="/api/integrations", tags=["integrations"])
 api_router.include_router(ingest_router, prefix="/api/ingest", tags=["ingest"])
+api_router.include_router(adhoc_router, prefix="/api/adhoc", tags=["adhoc-uploads"])
 api_router.include_router(dashboard_router, prefix="/api/dashboard", tags=["dashboard"])
 api_router.include_router(settings_router, prefix="/api/settings", tags=["settings"])
 api_router.include_router(coa_router, prefix="/api/coa", tags=["chart-of-accounts"])

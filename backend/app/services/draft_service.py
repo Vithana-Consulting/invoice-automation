@@ -105,6 +105,7 @@ class DraftService:
 
         # Step 6: Create draft (carry validation warnings + tax breakup + bank details)
         validation_warnings = invoice.validation_errors if invoice.parsing_status == "WARNING" else None
+        validation_warnings = self._append_logical_duplicate_warning(invoice, validation_warnings)
         draft = self.draft_repo.create(
             invoice_id=invoice_id,
             vendor_name=vendor_name,
@@ -142,6 +143,52 @@ class DraftService:
         )
 
         return draft
+
+    def _append_logical_duplicate_warning(self, invoice, validation_warnings):
+        """Flag (warning-only) when this invoice looks like a re-scan of an earlier one.
+
+        Byte-level content_hash dedup misses re-scanned/re-saved copies. This merges
+        a LOGICAL_DUPLICATE_SUSPECTED entry into the draft's validation_warnings JSON
+        array. Never blocks — re-issues can be legitimate corrections.
+        """
+        try:
+            dups = self.invoice_repo.find_logical_duplicates(
+                vendor_name=invoice.vendor_name or "",
+                invoice_number=invoice.invoice_number or "",
+                exclude_invoice_id=invoice.id,
+            )
+        except Exception as e:
+            logger.warning("Logical duplicate check failed for invoice %d: %s", invoice.id, e)
+            return validation_warnings
+        if not dups:
+            return validation_warnings
+
+        warnings = []
+        if validation_warnings:
+            try:
+                parsed = json.loads(validation_warnings)
+                if isinstance(parsed, list):
+                    warnings = parsed
+            except (ValueError, TypeError):
+                pass
+
+        dup_ids = [d.id for d in dups]
+        warnings.append({
+            "code": "LOGICAL_DUPLICATE_SUSPECTED",
+            "message": (
+                f"Invoice number '{invoice.invoice_number}' from a similar vendor was already "
+                f"ingested (invoice(s) {dup_ids}). Possible re-scan/duplicate — verify before pushing."
+            ),
+            "duplicate_invoice_ids": dup_ids,
+        })
+
+        self.audit_repo.log(
+            entity_type="invoice",
+            entity_id=invoice.id,
+            action="logical_duplicate_flagged",
+            details={"invoice_number": invoice.invoice_number, "duplicate_invoice_ids": dup_ids},
+        )
+        return json.dumps(warnings)
 
     def refresh_draft_from_invoice(self, draft_id: int) -> Optional[InvoiceDraft]:
         """Re-sync a draft's extracted fields from its invoice record after a reparse.

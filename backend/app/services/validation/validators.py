@@ -164,40 +164,47 @@ class CompositionVendorValidator(InvoiceValidator):
 
 
 class DuplicateBillValidator(InvoiceValidator):
-    """Detect probable duplicates.
+    """Detect probable duplicates (vendor/invoice_number compared case- and
+    whitespace-insensitively).
 
-    Primary check (HARD_BLOCK): same vendor + invoice_number already PUSHED.
-    This catches re-submissions with a corrected date.
-
-    Fallback check (HARD_BLOCK): same vendor + invoice_date + total_amount already PUSHED,
-    used when invoice_number is blank (e.g., unstructured invoices).
+    Two-tier severity, applied to both the invoice_number match and the
+    vendor+date+amount fallback (used when invoice_number is blank):
+      - already PUSHED  → HARD_BLOCK (overridable with DUPLICATE_CONFIRMED_DIFFERENT)
+      - active draft not yet pushed (PENDING_REVIEW/PENDING_VENDOR/APPROVED/PUSH_FAILED)
+                        → WARNING (surfaced, does not block the push)
     """
     code = "PROBABLE_DUPLICATE"
 
+    # Active (not-yet-pushed) draft statuses — a match here is a soft WARNING.
+    ACTIVE_STATUSES = ("PENDING_REVIEW", "PENDING_VENDOR", "APPROVED", "PUSH_FAILED")
+
     def validate(self, draft, invoice, db) -> ValidationResult:
-        from sqlalchemy import text
+        from sqlalchemy import bindparam, text
 
         invoice_number = (draft.invoice_number or "").strip()
         vendor_name = draft.vendor_name
         company_id = draft.company_id
         self_id = draft.id
 
+        # Vendor/invoice_number compared case- and edge-whitespace-insensitively
+        # (LOWER(TRIM(...))) so cosmetic variants still match. Bound params only —
+        # the active-status list is passed via an expanding bindparam (std #1).
+        active_statuses = list(self.ACTIVE_STATUSES)
+
         # ── Primary: match by invoice_number (strongest signal) ────────────
         if invoice_number:
+            params = {"cid": company_id, "vendor": vendor_name,
+                      "inv_num": invoice_number, "self_id": self_id}
+
+            # PUSHED duplicate → HARD_BLOCK
             rows = db.execute(text("""
                 SELECT id, invoice_number, pushed_at FROM invoice_drafts
                 WHERE company_id = :cid
-                  AND vendor_name = :vendor
-                  AND invoice_number = :inv_num
+                  AND LOWER(TRIM(vendor_name)) = LOWER(TRIM(:vendor))
+                  AND LOWER(TRIM(invoice_number)) = LOWER(TRIM(:inv_num))
                   AND status = 'PUSHED'
                   AND id != :self_id
-            """), {
-                "cid": company_id,
-                "vendor": vendor_name,
-                "inv_num": invoice_number,
-                "self_id": self_id,
-            }).fetchall()
-
+            """), params).fetchall()
             if rows:
                 dup = rows[0]
                 return ValidationResult(self.code, False, Severity.HARD_BLOCK,
@@ -205,35 +212,68 @@ class DuplicateBillValidator(InvoiceValidator):
                                         f"(draft #{dup.id}). If this is a corrected re-issue, update the invoice "
                                         "number on the original before pushing this one.",
                                         {"duplicate_draft_id": dup.id, "duplicate_invoice": dup.invoice_number})
+
+            # Active not-yet-pushed duplicate → WARNING (surfaced, not blocking)
+            stmt = text("""
+                SELECT id, invoice_number, status FROM invoice_drafts
+                WHERE company_id = :cid
+                  AND LOWER(TRIM(vendor_name)) = LOWER(TRIM(:vendor))
+                  AND LOWER(TRIM(invoice_number)) = LOWER(TRIM(:inv_num))
+                  AND status IN :statuses
+                  AND id != :self_id
+            """).bindparams(bindparam("statuses", expanding=True))
+            rows = db.execute(stmt, {**params, "statuses": active_statuses}).fetchall()
+            if rows:
+                dup = rows[0]
+                return ValidationResult(self.code, True, Severity.WARNING,
+                                        f"Another active draft (#{dup.id}, status {dup.status}) has the same vendor "
+                                        f"and invoice number '{invoice_number}'. Possible duplicate — verify before pushing.",
+                                        {"duplicate_draft_id": dup.id, "duplicate_invoice": dup.invoice_number})
             return ValidationResult(self.code, True, Severity.HARD_BLOCK, "No duplicates found (by invoice number)")
 
         # ── Fallback: match by date + amount when invoice_number is blank ──
         # Use a tolerance band instead of exact equality to handle float representation drift.
         amt = float(draft.total_amount or 0)
+        params = {"cid": company_id, "vendor": vendor_name,
+                  "date": draft.invoice_date, "amt": amt, "self_id": self_id}
+
+        # PUSHED duplicate → HARD_BLOCK
         rows = db.execute(text("""
             SELECT id, invoice_number, pushed_at FROM invoice_drafts
             WHERE company_id = :cid
-              AND vendor_name = :vendor
+              AND LOWER(TRIM(vendor_name)) = LOWER(TRIM(:vendor))
               AND invoice_date = :date
               AND total_amount BETWEEN :amt - 0.01 AND :amt + 0.01
               AND status = 'PUSHED'
               AND id != :self_id
-        """), {
-            "cid": company_id,
-            "vendor": vendor_name,
-            "date": draft.invoice_date,
-            "amt": amt,
-            "self_id": self_id,
-        }).fetchall()
+        """), params).fetchall()
+        if rows:
+            dup = rows[0]
+            return ValidationResult(self.code, False, Severity.HARD_BLOCK,
+                                    f"A bill with the same vendor, date and amount was already pushed "
+                                    f"(draft #{dup.id}, invoice {dup.invoice_number}). "
+                                    "Confirm this is a different invoice before pushing.",
+                                    {"duplicate_draft_id": dup.id, "duplicate_invoice": dup.invoice_number})
 
-        if not rows:
-            return ValidationResult(self.code, True, Severity.HARD_BLOCK, "No duplicates found")
-        dup = rows[0]
-        return ValidationResult(self.code, False, Severity.HARD_BLOCK,
-                                f"A bill with the same vendor, date and amount was already pushed "
-                                f"(draft #{dup.id}, invoice {dup.invoice_number}). "
-                                "Confirm this is a different invoice before pushing.",
-                                {"duplicate_draft_id": dup.id, "duplicate_invoice": dup.invoice_number})
+        # Active not-yet-pushed duplicate → WARNING
+        stmt = text("""
+            SELECT id, invoice_number, status FROM invoice_drafts
+            WHERE company_id = :cid
+              AND LOWER(TRIM(vendor_name)) = LOWER(TRIM(:vendor))
+              AND invoice_date = :date
+              AND total_amount BETWEEN :amt - 0.01 AND :amt + 0.01
+              AND status IN :statuses
+              AND id != :self_id
+        """).bindparams(bindparam("statuses", expanding=True))
+        rows = db.execute(stmt, {**params, "statuses": active_statuses}).fetchall()
+        if rows:
+            dup = rows[0]
+            return ValidationResult(self.code, True, Severity.WARNING,
+                                    f"Another active draft (#{dup.id}, status {dup.status}) has the same vendor, "
+                                    "date and amount. Possible duplicate — verify before pushing.",
+                                    {"duplicate_draft_id": dup.id, "duplicate_invoice": dup.invoice_number})
+
+        return ValidationResult(self.code, True, Severity.HARD_BLOCK, "No duplicates found")
 
 
 class GSTRoutingValidator(InvoiceValidator):

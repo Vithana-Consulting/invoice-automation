@@ -27,6 +27,10 @@ MIME_TYPE_MAP = {
     "image/bmp": "bmp",
 }
 
+# Bound the label scan (coding standard #6 — list queries bounded).
+# 200 messages/page * 25 pages = 5000 messages max per run; remainder picked up next run.
+MAX_LIST_PAGES = 25
+
 
 class EmailService:
     def __init__(self, db: Session, gmail_service=None, label: str = None):
@@ -86,7 +90,13 @@ class EmailService:
         return build("gmail", "v1", credentials=creds)
 
     def fetch_and_process(self) -> dict:
-        """Fetch emails labeled as invoices from Gmail, download attachments, and parse."""
+        """Fetch invoice-labeled threads from Gmail, download attachments from
+        every message in each thread, and parse.
+
+        Works at the THREAD level: each label hit is expanded to its whole thread,
+        so invoices sent as *replies* within a parent thread are ingested even
+        when the reply message itself doesn't carry the watched label.
+        """
         # Use injected per-tenant service, or fall back to legacy file-based auth
         service = self._gmail_service or self._get_gmail_service()
         label = self.label
@@ -95,16 +105,41 @@ class EmailService:
         if not label_id:
             raise EmailFetchError(f"Gmail label '{label}' not found")
 
-        results = (
-            service.users()
-            .messages()
-            .list(userId="me", labelIds=[label_id], maxResults=200)
-            .execute()
-        )
-        messages = results.get("messages", [])
+        # Walk all label pages, collecting unique thread ids (bounded — std #6).
+        thread_ids: List[str] = []
+        seen_threads: set[str] = set()
+        total_messages = 0
+        page_token = None
+        pages = 0
+        while True:
+            results = (
+                service.users()
+                .messages()
+                .list(userId="me", labelIds=[label_id], maxResults=200, pageToken=page_token)
+                .execute()
+            )
+            refs = results.get("messages", [])
+            total_messages += len(refs)
+            for msg_ref in refs:
+                tid = msg_ref.get("threadId", msg_ref["id"])
+                if tid not in seen_threads:
+                    seen_threads.add(tid)
+                    thread_ids.append(tid)
+            page_token = results.get("nextPageToken")
+            pages += 1
+            if not page_token:
+                break
+            if pages >= MAX_LIST_PAGES:
+                logger.warning(
+                    "Gmail label '%s' exceeded %d pages (%d threads so far); stopping "
+                    "pagination — remaining messages picked up next run.",
+                    label, MAX_LIST_PAGES, len(thread_ids),
+                )
+                break
 
         stats = {
-            "total_found": len(messages),
+            "total_found": total_messages,
+            "threads_found": len(thread_ids),
             "new_emails": 0,
             "skipped_existing": 0,
             "attachments_downloaded": 0,
@@ -112,23 +147,44 @@ class EmailService:
             "errors": [],
         }
 
-        for msg_ref in messages:
-            msg_id = msg_ref["id"]
+        for thread_id in thread_ids:
+            try:
+                self._process_thread(service, thread_id, stats)
+            except Exception as e:
+                logger.error("Error processing thread %s: %s", thread_id, e)
+                stats["errors"].append({"thread_id": thread_id, "error": str(e)})
+
+        logger.info(
+            "Email fetch complete: %d threads, %d new, %d skipped, %d attachments, %d parsed",
+            stats["threads_found"], stats["new_emails"], stats["skipped_existing"],
+            stats["attachments_downloaded"], stats["invoices_parsed"],
+        )
+        return stats
+
+    def _process_thread(self, service, thread_id: str, stats: dict):
+        """Fetch a full thread and process every message in it.
+
+        ``threads().get(format='full')`` returns full payloads (incl. attachment
+        ids) for all messages, so no extra per-message GET is needed. Already-seen
+        messages are skipped via ``email_repo.exists``, so re-running a thread only
+        handles new replies.
+        """
+        thread = (
+            service.users()
+            .threads()
+            .get(userId="me", id=thread_id, format="full")
+            .execute()
+        )
+        for msg in thread.get("messages", []):
+            msg_id = msg["id"]
             if self.email_repo.exists(msg_id):
                 stats["skipped_existing"] += 1
                 continue
             try:
-                self._process_message(service, msg_id, stats)
+                self._process_message(service, msg, thread_id, stats)
             except Exception as e:
                 logger.error("Error processing message %s: %s", msg_id, e)
                 stats["errors"].append({"message_id": msg_id, "error": str(e)})
-
-        logger.info(
-            "Email fetch complete: %d new, %d skipped, %d attachments, %d parsed",
-            stats["new_emails"], stats["skipped_existing"],
-            stats["attachments_downloaded"], stats["invoices_parsed"],
-        )
-        return stats
 
     def _find_label_id(self, service, label_name: str) -> str | None:
         results = service.users().labels().list(userId="me").execute()
@@ -138,13 +194,9 @@ class EmailService:
                 return lbl["id"]
         return None
 
-    def _process_message(self, service, msg_id: str, stats: dict):
-        msg = (
-            service.users()
-            .messages()
-            .get(userId="me", id=msg_id, format="full")
-            .execute()
-        )
+    def _process_message(self, service, msg: dict, thread_id: str, stats: dict):
+        """Process one already-fetched full message dict (from threads().get)."""
+        msg_id = msg["id"]
 
         headers = {h["name"]: h["value"] for h in msg["payload"].get("headers", [])}
         subject = headers.get("Subject", "(no subject)")
@@ -162,6 +214,7 @@ class EmailService:
 
         email_record = ProcessedEmail(
             message_id=msg_id,
+            thread_id=thread_id,
             subject=subject[:500],
             sender=sender[:255],
             received_at=received_at,

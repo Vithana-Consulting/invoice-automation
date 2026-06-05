@@ -1,13 +1,19 @@
 """Database session management.
 
-Connection pool tuned for Cloud Run + Cloud SQL micro (max 25 connections):
-  pool_size=2: keep 2 idle connections per instance
-  max_overflow=3: allow 3 extra under burst (5 total per instance)
+Connection pool (SQLAlchemy QueuePool — the Python equivalent of a HikariCP
+managed pool; there is no HikariCP for Python/SQLAlchemy):
 
-  Safe ceiling: set Cloud Run max_instances=4 for Cloud SQL micro
-    → 4 × 5 = 20 connections < 25 limit
+  pool_size=6:       persistent connections kept open per instance
+  max_overflow=12:   extra connections allowed under burst
+  → hard ceiling of 18 connections (pool_size + max_overflow), matching a
+    HikariCP maximumPoolSize=18.
+  pool_timeout=10:   a caller waits at most 10s for a free connection before
+    raising TimeoutError (HikariCP connectionTimeout=10s).
 
-  For Cloud SQL db-g1-small (1000 connections), max_instances=10+ is fine.
+  18 connections per instance fits under a Cloud SQL micro (~25) limit for a
+  single instance. With Cloud Run autoscaling this is PER INSTANCE — N
+  instances × 18 must stay under the server's max_connections. Cap Cloud Run
+  max_instances accordingly.
 """
 from __future__ import annotations
 
@@ -48,10 +54,10 @@ def _build_engine():
     return create_engine(
         url,
         pool_pre_ping=True,     # health-check connection before use
-        pool_size=2,            # keep 2 idle connections per instance
-        max_overflow=3,         # allow 3 extra under burst (5 total)
+        pool_size=6,            # persistent connections kept open per instance
+        max_overflow=12,        # burst headroom (6 + 12 = 18 hard ceiling)
         pool_recycle=300,       # recycle after 5 min (MySQL wait_timeout safe)
-        pool_timeout=30,        # fail fast if no connection available in 30s
+        pool_timeout=10,        # wait at most 10s for a free connection, then fail
     )
 
 

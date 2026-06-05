@@ -11,6 +11,9 @@ alembic>=1.13.0
 pydantic-settings>=2.1.0
 python-dotenv>=1.0.0
 
+# LLM parser (OpenAI SDK — also used for Gemini/Ollama OpenAI-compatible endpoints)
+openai>=1.0.0
+
 # PDF / OCR parsing
 pdfplumber>=0.10.0
 pytesseract>=0.3.10

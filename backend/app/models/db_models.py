@@ -111,6 +111,7 @@ class ProcessedEmail(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
     message_id = Column(String(255), unique=True, nullable=False)
+    thread_id = Column(String(255), nullable=True, index=True)  # Gmail thread this message belongs to
     subject = Column(String(500), default="")
     sender = Column(String(255), default="")
     received_at = Column(DateTime, nullable=True)
@@ -127,6 +128,13 @@ class ProcessedEmail(Base):
 class InvoiceRecord(Base):
     """Raw invoice files with parsed metadata."""
     __tablename__ = "invoices"
+    __table_args__ = (
+        # Per-tenant content_hash uniqueness (NOT global — the same file may
+        # legitimately arrive for two different companies).
+        Index("uq_invoices_company_content_hash", "company_id", "content_hash", unique=True),
+        # Supports duplicate-detection lookups by vendor + invoice number.
+        Index("ix_invoices_company_vendor_invnum", "company_id", "vendor_name", "invoice_number"),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
@@ -134,7 +142,7 @@ class InvoiceRecord(Base):
     file_path = Column(String(500), nullable=False)
     file_name = Column(String(255), default="")
     file_type = Column(String(20), default="pdf")
-    content_hash = Column(String(64), unique=True, nullable=True)
+    content_hash = Column(String(64), nullable=True)  # uniqueness is per-tenant (see __table_args__)
 
     # Parsed fields
     invoice_number = Column(String(100), nullable=True)
@@ -182,6 +190,58 @@ class InvoiceRecord(Base):
 
     email = relationship("ProcessedEmail", back_populates="invoices")
     drafts = relationship("InvoiceDraft", back_populates="invoice")
+
+
+class AdhocInvoiceUpload(Base):
+    """Ad-hoc / manually uploaded invoices, parsed for one-off export.
+
+    Deliberately SEPARATE from `invoices`/`invoice_drafts` — these never enter
+    the Gmail ingestion pipeline, never become drafts, and never appear on the
+    Invoices page. Used by the Upload tab (parse → table → Excel export).
+    """
+    __tablename__ = "adhoc_invoice_uploads"
+    __table_args__ = (
+        # Per-tenant dedup of identical re-uploads.
+        Index("uq_adhoc_company_content_hash", "company_id", "content_hash", unique=True),
+        # Listing newest-first per tenant.
+        Index("ix_adhoc_company_created", "company_id", "created_at"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    uploaded_by_email = Column(String(255), nullable=True)
+
+    # File metadata
+    file_name = Column(String(255), default="")
+    file_path = Column(String(500), nullable=True)
+    file_type = Column(String(20), default="pdf")
+    content_hash = Column(String(64), nullable=True)
+
+    # Parsed fields (mirror app.models.domain.Invoice)
+    invoice_number = Column(String(100), nullable=True)
+    vendor_name = Column(String(500), nullable=True)
+    invoice_date = Column(String(20), nullable=True)
+    due_date = Column(String(20), nullable=True)
+    subtotal = Column(Numeric(15, 2), nullable=True)
+    tax_amount = Column(Numeric(15, 2), nullable=True)
+    total_amount = Column(Numeric(15, 2), nullable=True)
+    currency = Column(String(5), default="INR")
+    gst_number = Column(String(20), nullable=True)
+    pan_number = Column(String(15), nullable=True)
+    place_of_supply = Column(String(5), nullable=True)
+
+    # Raw / structured extras
+    line_items_json = Column(Text, nullable=True)
+    tax_breakup_json = Column(Text, nullable=True)
+    bank_details_json = Column(Text, nullable=True)
+    raw_json = Column(Text, nullable=True)
+
+    parser_mode = Column(String(30), nullable=True)
+    parse_status = Column(String(20), default="PARSED")  # PARSED | FAILED
+    error_message = Column(Text, nullable=True)
+
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class VendorCache(Base):
@@ -267,6 +327,13 @@ class InvoiceDraft(Base):
                               → REJECTED
     """
     __tablename__ = "invoice_drafts"
+    __table_args__ = (
+        # Supports the pre-push duplicate lookup by vendor + invoice number + status.
+        Index(
+            "ix_drafts_company_vendor_invnum_status",
+            "company_id", "vendor_name", "invoice_number", "status",
+        ),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)

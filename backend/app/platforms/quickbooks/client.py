@@ -9,6 +9,17 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
+def _escape_qbo_query_literal(value: str) -> str:
+    """Escape a string for safe use inside a QuickBooks query string literal.
+
+    QBO's query language wraps literals in single quotes and escapes embedded
+    apostrophes with a backslash (e.g. ``WHERE DisplayName = 'Adam\\'s Shop'``).
+    Backslashes are doubled first so they can't break the escape sequence.
+    See Intuit's data-queries docs.
+    """
+    return str(value).replace("\\", "\\\\").replace("'", "\\'")
+
+
 class QuickBooksAuth:
     """OAuth2 token manager for QuickBooks Online."""
 
@@ -85,7 +96,8 @@ class QuickBooksClient:
         return self._handle(resp)
 
     def find_vendor(self, name: str) -> list:
-        result = self.query(f"SELECT * FROM Vendor WHERE DisplayName = '{name}'")
+        safe = _escape_qbo_query_literal(name)
+        result = self.query(f"SELECT * FROM Vendor WHERE DisplayName = '{safe}'")
         return result.get("QueryResponse", {}).get("Vendor", [])
 
     def create_vendor(self, display_name: str) -> dict:

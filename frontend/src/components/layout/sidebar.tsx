@@ -7,6 +7,7 @@ import { clsx } from 'clsx';
 const navItems = [
   { href: '/dashboard', label: 'Dashboard', icon: 'LayoutDashboard' },
   { href: '/invoices', label: 'Invoices', icon: 'FileText' },
+  { href: '/upload', label: 'Upload', icon: 'Upload' },
   { href: '/vendors', label: 'Vendors', icon: 'Building2' },
   { href: '/bank-details', label: 'Bank Details', icon: 'CreditCard' },
   { href: '/payments', label: 'Payments', icon: 'Banknote' },
@@ -20,6 +21,7 @@ const navItems = [
 const iconMap: Record<string, string> = {
   LayoutDashboard: 'M4 5a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1H5a1 1 0 01-1-1V5zm10 0a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1V5zM4 15a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1H5a1 1 0 01-1-1v-4zm10 0a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z',
   FileText: 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z',
+  Upload: 'M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5',
   GitBranch: 'M6 3v12m0 0a3 3 0 103 3H15a3 3 0 100-3H9m-3 0a3 3 0 01-3-3V6a3 3 0 013-3m12 0a3 3 0 110 6',
   ArrowRightLeft: 'M7.5 21L3 16.5m0 0L7.5 12M3 16.5h13.5m0-13.5L21 7.5m0 0L16.5 12M21 7.5H7.5',
   Plug: 'M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1',
