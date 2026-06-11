@@ -12,7 +12,8 @@ from app.parsers.base import InvoiceParser
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_TYPES = {"pdf", "jpg", "jpeg", "png", "tiff", "tif", "bmp"}
+# doc/docx are converted to PDF first (convert-then-parse) — see InvoiceParser._prepare_source
+SUPPORTED_TYPES = {"pdf", "jpg", "jpeg", "png", "tiff", "tif", "bmp", "doc", "docx"}
 
 
 class LlamaParseParser(InvoiceParser):
@@ -35,10 +36,18 @@ class LlamaParseParser(InvoiceParser):
                 "Multiple keys can be supplied comma-separated for automatic rotation."
             )
 
-        ft = file_type.lower().lstrip(".")
-        if not self.supports(ft):
-            raise ParsingError(f"Unsupported file type: {ft}")
+        orig_ft = file_type.lower().lstrip(".")
+        if not self.supports(orig_ft):
+            raise ParsingError(f"Unsupported file type: {orig_ft}")
 
+        # Word documents are converted to a temporary PDF first (convert-then-parse).
+        src_path, _ft, cleanup = self._prepare_source(file_path, file_type)
+        try:
+            return self._parse_prepared(pool, src_path)
+        finally:
+            cleanup()
+
+    def _parse_prepared(self, pool, file_path: str) -> Invoice:
         try:
             from llama_parse import LlamaParse
         except ImportError:

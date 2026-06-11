@@ -21,7 +21,7 @@ interface IngestStatus {
   drafts_created?: number;
   error?: string;
 }
-import type { ColDef, CellValueChangedEvent } from 'ag-grid-community';
+import type { ColDef, CellValueChangedEvent, ColumnState } from 'ag-grid-community';
 import { SubTabs } from '@/components/ui/sub-tabs';
 
 const STATUS_COLORS: Record<string, string> = {
@@ -758,6 +758,91 @@ function GLAccountSelect({ accounts, currentId, currentName, disabled, onChange 
   );
 }
 
+/**
+ * "Columns" dropdown — lets an org show/hide grid columns. Toggling a column
+ * updates the grid immediately and calls `onPersist` so the layout is saved
+ * for the whole organization. Columns without a header (selection checkbox)
+ * and the always-on "Actions" column are not listed.
+ */
+function ColumnsMenu({
+  gridRef,
+  onPersist,
+}: {
+  gridRef: React.RefObject<AgGridReact>;
+  onPersist: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [cols, setCols] = useState<{ colId: string; label: string; visible: boolean }[]>([]);
+  const boxRef = useRef<HTMLDivElement>(null);
+
+  const refresh = useCallback(() => {
+    const api = gridRef.current?.api;
+    if (!api) return;
+    const list = (api.getColumns() || [])
+      .map((c) => ({
+        colId: c.getColId(),
+        label: (c.getColDef().headerName as string) || '',
+        visible: c.isVisible(),
+      }))
+      .filter((c) => c.label && c.label !== 'Actions');
+    setCols(list);
+  }, [gridRef]);
+
+  useEffect(() => {
+    if (!open) return;
+    refresh();
+    const onDown = (e: MouseEvent) => {
+      if (boxRef.current && !boxRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [open, refresh]);
+
+  const toggle = (colId: string, visible: boolean) => {
+    const api = gridRef.current?.api;
+    if (!api) return;
+    api.setColumnsVisible([colId], visible);
+    setCols((prev) => prev.map((c) => (c.colId === colId ? { ...c, visible } : c)));
+    onPersist();
+  };
+
+  const hiddenCount = cols.filter((c) => !c.visible).length;
+
+  return (
+    <div className="relative" ref={boxRef}>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="px-4 py-2 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 text-sm"
+      >
+        Columns{hiddenCount > 0 ? ` (${hiddenCount} hidden)` : ''} ▾
+      </button>
+      {open && (
+        <div className="absolute right-0 z-50 mt-1 w-64 max-h-96 overflow-y-auto rounded-lg border border-gray-200 bg-white shadow-lg p-2">
+          <div className="px-2 py-1 text-xs font-semibold text-gray-500 uppercase tracking-wide">
+            Show / hide columns
+          </div>
+          {cols.map((c) => (
+            <label
+              key={c.colId}
+              className="flex items-center gap-2 px-2 py-1.5 text-sm hover:bg-gray-50 rounded cursor-pointer"
+            >
+              <input
+                type="checkbox"
+                checked={c.visible}
+                onChange={(e) => toggle(c.colId, e.target.checked)}
+              />
+              <span className="text-gray-700">{c.label}</span>
+            </label>
+          ))}
+          <div className="text-[11px] text-gray-400 px-2 pt-2 border-t mt-1">
+            Saved for everyone in your organization.
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function InvoicesPage() {
   const gridRef = useRef<AgGridReact>(null);
   const queryClient = useQueryClient();
@@ -799,6 +884,67 @@ export default function InvoicesPage() {
     coaNameToIdRef.current = m;
     coaAccountsRef.current = coaAccounts;
   }, [coaAccounts]);
+
+  // --- Per-org saved column layout (shared by all members of the company) ---
+  // Loaded once, replayed onto the grid; user changes are debounced back to the API.
+  const { data: viewPrefData } = useQuery({
+    queryKey: ['view-prefs', 'invoices'],
+    queryFn: () =>
+      api.get<{ status: string; data: { columns: ColumnState[] | null } }>(
+        '/api/settings/view-prefs/invoices',
+      ),
+  });
+  const savedColsRef = useRef<ColumnState[] | null>(null);
+  const gridReadyRef = useRef(false);
+
+  const saveViewMutation = useMutation({
+    mutationFn: (columns: ColumnState[]) => api.put('/api/settings/view-prefs/invoices', { columns }),
+  });
+  const saveViewRef = useRef(saveViewMutation);
+  saveViewRef.current = saveViewMutation;
+
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const persistColumnState = useCallback(() => {
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(() => {
+      const api = gridRef.current?.api;
+      if (!api) return;
+      saveViewRef.current.mutate(api.getColumnState());
+    }, 800);
+  }, []);
+
+  const applySavedView = useCallback(() => {
+    const gridApi = gridRef.current?.api;
+    if (!gridApi) return;
+    const saved = savedColsRef.current;
+    if (saved && saved.length) {
+      gridApi.applyColumnState({ state: saved, applyOrder: true });
+    } else {
+      // No saved layout yet → start with the derived Net column hidden.
+      gridApi.applyColumnState({ state: [{ colId: 'net_amount', hide: true }] });
+    }
+  }, []);
+
+  useEffect(() => {
+    savedColsRef.current = viewPrefData?.data?.columns ?? null;
+    if (gridReadyRef.current) applySavedView();
+  }, [viewPrefData, applySavedView]);
+
+  const onGridReady = useCallback(() => {
+    gridReadyRef.current = true;
+    applySavedView();
+  }, [applySavedView]);
+
+  // Persist user-driven column changes (reorder/resize/show-hide). Skip events
+  // raised by our own applyColumnState/setColumnsVisible calls (source === 'api').
+  const onColumnLayoutChanged = useCallback(
+    (e: { source?: string; finished?: boolean }) => {
+      if (e.source === 'api') return;
+      if (e.finished === false) return; // mid-drag resize — wait for the final event
+      persistColumnState();
+    },
+    [persistColumnState],
+  );
 
   const allDrafts = data?.data || [];
   const filteredDrafts = activeTab === 'all' ? allDrafts : allDrafts.filter((d) => d.status === activeTab);
@@ -990,7 +1136,7 @@ export default function InvoicesPage() {
   const editableUnlessPushed = (p: { data: InvoiceDraft }) => p.data?.status !== 'PUSHED';
 
   const columnDefs = useMemo<ColDef[]>(() => [
-    { headerCheckboxSelection: true, checkboxSelection: true, width: 50, pinned: 'left' },
+    { colId: 'select', headerCheckboxSelection: true, checkboxSelection: true, width: 50, pinned: 'left', lockVisible: true },
     { field: 'id', headerName: 'ID', width: 70 },
     { field: 'invoice_number', headerName: 'Invoice #', width: 130, editable: editableUnlessPushed },
     { field: 'vendor_name', headerName: 'Vendor', width: 200, editable: editableUnlessPushed },
@@ -1023,6 +1169,20 @@ export default function InvoicesPage() {
         return Number.isFinite(n) ? n : null;
       },
       valueFormatter: (p: { value: number; data: InvoiceDraft }) =>
+        p.value != null ? `${p.data?.currency || ''} ${Number(p.value).toFixed(2)}` : '',
+    },
+    {
+      // Derived (read-only): aggregated total excluding tax = total_amount − tax_amount.
+      // Hidden by default; org can reveal it via the Columns menu.
+      colId: 'net_amount',
+      headerName: 'Net (excl. tax)',
+      width: 130,
+      valueGetter: (p: { data: InvoiceDraft }) => {
+        const total = p.data?.total_amount;
+        if (total == null) return null;
+        return Number(total) - Number(p.data?.tax_amount ?? 0);
+      },
+      valueFormatter: (p: { value: number | null; data: InvoiceDraft }) =>
         p.value != null ? `${p.data?.currency || ''} ${Number(p.value).toFixed(2)}` : '',
     },
     { field: 'currency', headerName: 'Cur', width: 70, editable: editableUnlessPushed },
@@ -1120,6 +1280,7 @@ export default function InvoicesPage() {
     },
     { field: 'external_bill_id', headerName: 'Bill ID', width: 120 },
     {
+      colId: 'pdf_status',
       headerName: 'PDF',
       width: 80,
       cellRenderer: (p: { data: InvoiceDraft }) => {
@@ -1372,6 +1533,7 @@ export default function InvoicesPage() {
           >
             Export Excel
           </button>
+          <ColumnsMenu gridRef={gridRef} onPersist={persistColumnState} />
         </div>
       </div>
 
@@ -1496,6 +1658,11 @@ export default function InvoicesPage() {
           columnDefs={columnDefs}
           defaultColDef={{ sortable: true, filter: true, resizable: true }}
           rowSelection="multiple"
+          onGridReady={onGridReady}
+          onColumnVisible={onColumnLayoutChanged}
+          onColumnMoved={onColumnLayoutChanged}
+          onColumnResized={onColumnLayoutChanged}
+          onColumnPinned={onColumnLayoutChanged}
           onSelectionChanged={onSelectionChanged}
           onCellValueChanged={onCellValueChanged}
           getRowId={(p) => String((p.data as InvoiceDraft).id)}

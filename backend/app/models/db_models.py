@@ -256,6 +256,26 @@ class VendorCache(Base):
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
 
+class CompanyViewPreference(Base):
+    """Per-org saved grid layout (column order / visibility / width) for a named view.
+
+    Shared across all members of the company — one row per (company_id, view_key),
+    e.g. view_key="invoices". `columns_json` stores the AG Grid column-state array
+    ([{colId, hide, width, ...}]) verbatim so the saved layout round-trips.
+    """
+    __tablename__ = "company_view_prefs"
+    __table_args__ = (
+        Index("uq_company_view_key", "company_id", "view_key", unique=True),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    view_key = Column(String(50), nullable=False)
+    columns_json = Column(Text, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class LegacyAuditLog(Base):
     """Tracks all significant actions for debugging and compliance (legacy table)."""
     __tablename__ = "audit_log"

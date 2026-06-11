@@ -36,7 +36,8 @@ logger = logging.getLogger(__name__)
 
 MAX_PARSE_ATTEMPTS = 3
 
-SUPPORTED_TYPES = {"pdf", "jpg", "jpeg", "png", "tiff", "tif", "bmp"}
+# doc/docx are converted to PDF first (convert-then-parse) — see InvoiceParser._prepare_source
+SUPPORTED_TYPES = {"pdf", "jpg", "jpeg", "png", "tiff", "tif", "bmp", "doc", "docx"}
 
 IMAGE_TYPES = {"jpg", "jpeg", "png", "tiff", "tif", "bmp", "webp"}
 
@@ -433,25 +434,30 @@ class LLMParser(InvoiceParser):
         if len(pool) > 1:
             logger.info("LLM parser using a pool of %d API keys (rotation enabled)", len(pool))
 
-        ft = file_type.lower().lstrip(".")
-        if not self.supports(ft):
-            raise ParsingError(f"Unsupported file type: {ft}")
+        orig_ft = file_type.lower().lstrip(".")
+        if not self.supports(orig_ft):
+            raise ParsingError(f"Unsupported file type: {orig_ft}")
 
-        # Capability probe — provider class decides vision support (key-agnostic,
-        # no API call is made by the constructor).
+        # Word documents are converted to a temporary PDF first (convert-then-parse).
+        src_path, ft, cleanup = self._prepare_source(file_path, file_type)
         try:
-            probe = get_llm_provider(
-                name=provider_name, api_key=pool.acquire(),
-                model=model, base_url=base_url,
-            )
-        except ValueError as e:
-            raise ParsingError(str(e))
+            # Capability probe — provider class decides vision support (key-agnostic,
+            # no API call is made by the constructor).
+            try:
+                probe = get_llm_provider(
+                    name=provider_name, api_key=pool.acquire(),
+                    model=model, base_url=base_url,
+                )
+            except ValueError as e:
+                raise ParsingError(str(e))
 
-        # Choose strategy: vision (direct images) or text (OCR → LLM)
-        if probe.supports_vision():
-            return self._parse_with_vision(pool, file_path, ft, provider_name, model, base_url, buyer_hint)
-        else:
-            return self._parse_with_text(pool, file_path, ft, provider_name, model, base_url, buyer_hint)
+            # Choose strategy: vision (direct images) or text (OCR → LLM)
+            if probe.supports_vision():
+                return self._parse_with_vision(pool, src_path, ft, provider_name, model, base_url, buyer_hint)
+            else:
+                return self._parse_with_text(pool, src_path, ft, provider_name, model, base_url, buyer_hint)
+        finally:
+            cleanup()
 
     def _call_llm(self, pool, provider_name: str, model: str, base_url: str,
                   prompt: str, image_paths: list[str] | None = None) -> str:

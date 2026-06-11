@@ -10,7 +10,7 @@ import json
 import logging
 import os
 
-from fastapi import APIRouter, Depends, File, Query, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 
@@ -132,6 +132,104 @@ async def update_company_settings(body: dict, user: User = Depends(get_current_u
             "pan_number": company.pan_number,
         },
     }
+
+
+# --- Per-org grid column layout (shared by all members of a company) ---
+
+# Only these named views may persist a layout (coding standard #12 — no magic strings).
+ALLOWED_VIEW_KEYS = {"invoices"}
+# Cap to keep a single layout small and bound the request (coding standard #5).
+MAX_VIEW_COLUMNS = 100
+
+
+def _require_view_key(view_key: str) -> str:
+    if view_key not in ALLOWED_VIEW_KEYS:
+        raise HTTPException(status_code=404, detail="Unknown view")
+    return view_key
+
+
+@router.get("/view-prefs/{view_key}")
+async def get_view_prefs(
+    view_key: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return the company-wide saved column layout for a grid view (or null)."""
+    from app.models.db_models import CompanyViewPreference
+    from app.tenant.context import TenantContext
+
+    _require_view_key(view_key)
+    company_id = TenantContext.get_optional()
+    if not company_id:
+        raise HTTPException(status_code=403, detail="No company context")
+
+    pref = (
+        db.query(CompanyViewPreference)
+        .filter(
+            CompanyViewPreference.company_id == company_id,
+            CompanyViewPreference.view_key == view_key,
+        )
+        .first()
+    )
+
+    columns = None
+    if pref and pref.columns_json:
+        try:
+            columns = json.loads(pref.columns_json)
+        except json.JSONDecodeError:
+            columns = None
+
+    return {"status": "success", "data": {"view_key": view_key, "columns": columns}}
+
+
+@router.put("/view-prefs/{view_key}")
+async def update_view_prefs(
+    view_key: str,
+    body: dict,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Upsert the company-wide column layout for a grid view.
+
+    Body: {"columns": [{"colId": "...", "hide": bool, "width": int, ...}, ...]}.
+    The array is the AG Grid column-state, stored verbatim and replayed on load.
+    """
+    from app.models.db_models import CompanyViewPreference
+    from app.tenant.context import TenantContext
+
+    _require_view_key(view_key)
+    company_id = TenantContext.get_optional()
+    if not company_id:
+        raise HTTPException(status_code=403, detail="No company context")
+
+    columns = body.get("columns")
+    if not isinstance(columns, list):
+        raise HTTPException(status_code=400, detail="`columns` must be a list")
+    if len(columns) > MAX_VIEW_COLUMNS:
+        raise HTTPException(status_code=400, detail="Too many columns")
+    # Keep only entries that carry a string colId — discard anything malformed.
+    clean = [c for c in columns if isinstance(c, dict) and isinstance(c.get("colId"), str)]
+
+    pref = (
+        db.query(CompanyViewPreference)
+        .filter(
+            CompanyViewPreference.company_id == company_id,
+            CompanyViewPreference.view_key == view_key,
+        )
+        .first()
+    )
+    if pref:
+        pref.columns_json = json.dumps(clean)
+    else:
+        pref = CompanyViewPreference(
+            company_id=company_id,
+            view_key=view_key,
+            columns_json=json.dumps(clean),
+        )
+        db.add(pref)
+
+    db.commit()
+    return {"status": "success", "data": {"view_key": view_key, "columns": clean}}
 
 
 @router.post("/gmail-credentials")

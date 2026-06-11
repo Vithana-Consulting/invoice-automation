@@ -39,7 +39,8 @@ from app.tenant.context import TenantContext
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-ALLOWED_EXTENSIONS = {"pdf", "jpg", "jpeg", "png", "tiff", "tif", "bmp"}
+# doc/docx are converted to PDF before parsing (convert-then-parse, see parsers).
+ALLOWED_EXTENSIONS = {"pdf", "jpg", "jpeg", "png", "tiff", "tif", "bmp", "doc", "docx"}
 
 
 def _require_user_id(access_token: Optional[str]) -> int:

@@ -95,6 +95,7 @@ Push (Zoho Books / QuickBooks Online / Tally Prime)
 
 - **Tesseract OCR** — a system binary installed via `apt-get`. Cannot run in pure serverless (Lambda, Vercel Functions). Requires a container runtime.
 - **Poppler** (`pdf2image`) — another system binary for PDF-to-image conversion. Same constraint.
+- **LibreOffice** (`libreoffice-writer`) — system binary used to convert `.doc/.docx` invoices to PDF before parsing (`app/utils/document_converter.py`). Installed via `apt-get` in the Dockerfile. Same container-runtime constraint.
 - **pdf2image on large PDFs** — converts pages to in-memory PNG. Needs ≥2GB RAM per container.
 
 ---
@@ -234,7 +235,7 @@ day3/
 
 ### The constraint that decides everything
 
-The backend runs **Tesseract OCR** and **Poppler** — both are system binaries installed via `apt-get` in the Dockerfile. This eliminates all pure-serverless options:
+The backend runs **Tesseract OCR**, **Poppler**, and **LibreOffice** (for `.doc/.docx` → PDF conversion) — all system binaries installed via `apt-get` in the Dockerfile. This eliminates all pure-serverless options:
 
 | Platform | Verdict | Reason |
 |---|---|---|

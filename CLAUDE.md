@@ -111,10 +111,11 @@ FRONTEND_URL=http://localhost:3005
 ## Parser Pipeline
 
 ```
-PDF → images (pdf2image) → LLM vision → validate → retry up to 3× with correction prompt
-                                                  ↘ (non-vision providers: Tesseract OCR → LLM text)
+(.doc/.docx → PDF via LibreOffice) → PDF → images (pdf2image) → LLM vision → validate → retry up to 3× with correction prompt
+                                                                            ↘ (non-vision providers: Tesseract OCR → LLM text)
 ```
 
+- **Accepted inputs:** `pdf`, images (`jpg/jpeg/png/tiff/tif/bmp`), and **Word `doc`/`docx`**. Word files are converted to PDF first ("convert-then-parse") by `InvoiceParser._prepare_source` → `app/utils/document_converter.py` (headless LibreOffice; requires `libreoffice-writer`, installed in the backend Dockerfile). This applies to BOTH the Gmail ingest and manual-upload flows.
 - **Three modes** (`PARSER_MODE`): `llm` (default in `.env`), `llamaparse`, `tesseract`. Factory in `app/parsers/__init__.py`.
 - **LLM provider registry** (`@register_llm_provider` in `app/parsers/llm_providers.py`) — registered: **`openai`, `anthropic`, `google` (Gemini, OpenAI-compatible), `ollama`**. Vision-capable providers extract from images directly; others fall back to OCR→text.
 - **Retry loop** (`MAX_PARSE_ATTEMPTS = 3`): re-parses while validation errors exist, appending a human-readable correction section. After 3 attempts, a final auto-correction pass attempts single-char GSTIN fixes / PAN-based reconstruction.

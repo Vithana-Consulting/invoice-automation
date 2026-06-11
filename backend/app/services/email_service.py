@@ -25,6 +25,9 @@ MIME_TYPE_MAP = {
     "image/png": "png",
     "image/tiff": "tiff",
     "image/bmp": "bmp",
+    # Word documents — converted to PDF before parsing (convert-then-parse).
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+    "application/msword": "doc",
 }
 
 # Bound the label scan (coding standard #6 — list queries bounded).

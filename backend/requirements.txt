@@ -20,6 +20,14 @@ pytesseract>=0.3.10
 pdf2image>=1.17.0
 Pillow>=10.0.0
 
+# ── System binaries (NOT pip-installable — installed via apt in backend/Dockerfile) ──
+#   tesseract-ocr      → OCR engine for pytesseract
+#   poppler-utils      → PDF→image rasterising for pdf2image
+#   libreoffice-writer → .doc/.docx → PDF conversion (app/utils/document_converter.py)
+# Non-Docker hosts must install these manually, e.g.:
+#   apt-get install -y tesseract-ocr poppler-utils libreoffice-writer   (Debian/Ubuntu)
+#   brew install tesseract poppler && brew install --cask libreoffice    (macOS)
+
 # Gmail API
 google-api-python-client>=2.100.0
 google-auth-httplib2>=0.2.0
