@@ -23,6 +23,7 @@ from app.platforms.base import (
     test_platform,
 )
 from app.platforms.zoho.auth import ZohoAuth
+from app.platforms.quickbooks.client import QuickBooksAuth
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -314,6 +315,95 @@ def zoho_oauth_callback(
 
     frontend_url = getattr(settings, "FRONTEND_URL", "http://localhost:3004")
     return RedirectResponse(url=f"{frontend_url}/integrations?zoho_connected=1")
+
+
+# ── QuickBooks OAuth flow ─────────────────────────────────────────────────────
+
+QUICKBOOKS_SCOPES = "com.intuit.quickbooks.accounting"
+
+
+@router.get("/quickbooks/oauth/authorize")
+def quickbooks_oauth_authorize(
+    integration_id: int = Query(..., description="ID of the saved QuickBooks integration"),
+    db: Session = Depends(get_db),
+):
+    """Return the Intuit OAuth authorization URL. Redirect the user here to begin the flow."""
+    repo = IntegrationRepository(db)
+    integration = repo.get_by_id(integration_id)
+    if not integration or integration.platform != "quickbooks":
+        raise HTTPException(status_code=404, detail="QuickBooks integration not found")
+
+    config = decrypt_config(integration.config_encrypted)
+    client_id = config.get("client_id", "")
+    redirect_uri = config.get("redirect_uri", "")
+
+    if not client_id or not redirect_uri:
+        raise HTTPException(
+            status_code=400,
+            detail="client_id and redirect_uri must be saved in the integration config before authorising.",
+        )
+
+    params = {
+        "client_id": client_id,
+        "response_type": "code",
+        "scope": QUICKBOOKS_SCOPES,
+        "redirect_uri": redirect_uri,
+        "state": str(integration_id),
+    }
+    full_url = f"{QuickBooksAuth.AUTHORIZE_URL}?{urlencode(params)}"
+    logger.info("QuickBooks OAuth authorize URL generated for integration %d", integration_id)
+    return {"status": "success", "data": {"authorize_url": full_url}}
+
+
+@router.get("/quickbooks/oauth/callback")
+def quickbooks_oauth_callback(
+    code: str = Query(...),
+    state: str = Query(...),
+    realmId: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """Intuit redirects here after the user grants access.
+
+    Exchanges the grant code for a refresh token, persists it together with the
+    realmId (Company ID) Intuit returns, then redirects back to the frontend.
+    """
+    try:
+        integration_id = int(state)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid state parameter")
+
+    repo = IntegrationRepository(db)
+    integration = repo.get_by_id(integration_id)
+    if not integration or integration.platform != "quickbooks":
+        raise HTTPException(status_code=404, detail="QuickBooks integration not found")
+
+    config = decrypt_config(integration.config_encrypted)
+    client_id = config.get("client_id", "")
+    client_secret = config.get("client_secret", "")
+    redirect_uri = config.get("redirect_uri", "")
+    frontend_url = getattr(settings, "FRONTEND_URL", "http://localhost:3005")
+
+    try:
+        token_data = QuickBooksAuth.exchange_code(
+            client_id=client_id,
+            client_secret=client_secret,
+            code=code,
+            redirect_uri=redirect_uri,
+        )
+    except Exception as e:
+        logger.error("QuickBooks code exchange failed for integration %d: %s", integration_id, e)
+        return RedirectResponse(
+            url=f"{frontend_url}/integrations?quickbooks_error={str(e)[:120]}"
+        )
+
+    # Persist the refresh token; auto-fill the realm_id (Company ID) Intuit returns.
+    config["refresh_token"] = token_data["refresh_token"]
+    if realmId:
+        config["realm_id"] = realmId
+    repo.update(integration_id, config_encrypted=encrypt_config(config), is_enabled=True)
+    logger.info("QuickBooks refresh token saved for integration %d (realm %s)", integration_id, realmId)
+
+    return RedirectResponse(url=f"{frontend_url}/integrations?quickbooks_connected=1")
 
 
 def _integration_to_dict(i) -> dict:

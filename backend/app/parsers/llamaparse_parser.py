@@ -6,6 +6,7 @@ from typing import List
 
 from app.config import settings
 from app.core.exceptions import ParsingError
+from app.core.key_pool import KeyExhaustedError, get_key_pool, run_with_rotation
 from app.models.domain import Invoice, LineItem
 from app.parsers.base import InvoiceParser
 
@@ -24,9 +25,14 @@ class LlamaParseParser(InvoiceParser):
         return file_type.lower().lstrip(".") in SUPPORTED_TYPES
 
     def parse(self, file_path: str, file_type: str, buyer_hint=None) -> Invoice:
-        if not settings.LLAMAPARSE_API_KEY:
+        # LLAMAPARSE_API_KEY may hold a comma/newline-separated pool of keys;
+        # the pool rotates to the next key on a rate-limit or failure.
+        pool = get_key_pool("llamaparse", settings.LLAMAPARSE_API_KEY,
+                            cooldown_seconds=settings.KEY_POOL_COOLDOWN_SECONDS)
+        if len(pool) == 0:
             raise ParsingError(
-                "LLAMAPARSE_API_KEY is not set. Cannot use LlamaParse parser."
+                "LLAMAPARSE_API_KEY is not set. Cannot use LlamaParse parser. "
+                "Multiple keys can be supplied comma-separated for automatic rotation."
             )
 
         ft = file_type.lower().lstrip(".")
@@ -40,13 +46,18 @@ class LlamaParseParser(InvoiceParser):
                 "llama-parse package not installed. Run: pip install llama-parse"
             )
 
-        try:
+        def _load(key: str):
             parser = LlamaParse(
-                api_key=settings.LLAMAPARSE_API_KEY,
+                api_key=key,
                 result_type="markdown",
                 verbose=False,
             )
-            documents = parser.load_data(file_path)
+            return parser.load_data(file_path)
+
+        try:
+            documents = run_with_rotation(pool, _load)
+        except KeyExhaustedError as e:
+            raise ParsingError(f"All LlamaParse API keys are rate-limited or failing: {e}")
         except Exception as e:
             raise ParsingError(f"LlamaParse API call failed: {e}")
 

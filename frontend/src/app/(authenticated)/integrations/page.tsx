@@ -85,8 +85,11 @@ export default function IntegrationsPage() {
   const [zohoAuthStatus, setZohoAuthStatus] = useState<'success' | 'error' | null>(null);
   const [zohoAuthError, setZohoAuthError] = useState<string>('');
   const [zohoAuthorising, setZohoAuthorising] = useState(false);
+  const [qbAuthStatus, setQbAuthStatus] = useState<'success' | 'error' | null>(null);
+  const [qbAuthError, setQbAuthError] = useState<string>('');
+  const [qbAuthorising, setQbAuthorising] = useState(false);
 
-  // Handle redirect back from Zoho OAuth callback
+  // Handle redirect back from Zoho / QuickBooks OAuth callbacks
   useEffect(() => {
     if (searchParams.get('zoho_connected') === '1') {
       setZohoAuthStatus('success');
@@ -95,6 +98,14 @@ export default function IntegrationsPage() {
     } else if (searchParams.get('zoho_error')) {
       setZohoAuthStatus('error');
       setZohoAuthError(searchParams.get('zoho_error') || 'Unknown error');
+      window.history.replaceState({}, '', '/integrations');
+    } else if (searchParams.get('quickbooks_connected') === '1') {
+      setQbAuthStatus('success');
+      queryClient.invalidateQueries({ queryKey: ['integrations'] });
+      window.history.replaceState({}, '', '/integrations');
+    } else if (searchParams.get('quickbooks_error')) {
+      setQbAuthStatus('error');
+      setQbAuthError(searchParams.get('quickbooks_error') || 'Unknown error');
       window.history.replaceState({}, '', '/integrations');
     }
   }, [searchParams, queryClient]);
@@ -203,6 +214,25 @@ export default function IntegrationsPage() {
     }
   };
 
+  const handleQuickbooksAuthorise = async (integrationId: number) => {
+    setQbAuthorising(true);
+    try {
+      const res = await api.get<ApiResponse<{ authorize_url: string }>>(
+        `/api/integrations/quickbooks/oauth/authorize?integration_id=${integrationId}`
+      );
+      const url = res.data?.authorize_url;
+      if (url) {
+        window.location.href = url;
+      } else {
+        alert('Could not generate QuickBooks authorisation URL. Check your config.');
+      }
+    } catch (err: any) {
+      alert(`QuickBooks authorise failed: ${err.message || 'Unknown error'}`);
+    } finally {
+      setQbAuthorising(false);
+    }
+  };
+
   const openConfigForm = async (platform: string, integrationId: number | null) => {
     const schema = schemas.get(platform);
     if (!schema) return;
@@ -292,6 +322,15 @@ export default function IntegrationsPage() {
                     className="text-sm px-3 py-1 bg-orange-500 text-white rounded-lg hover:bg-orange-600 disabled:opacity-50"
                   >
                     {zohoAuthorising ? 'Redirecting...' : 'Authorise with Zoho'}
+                  </button>
+                )}
+                {item.platform === 'quickbooks' && (
+                  <button
+                    onClick={() => handleQuickbooksAuthorise(item.id!)}
+                    disabled={qbAuthorising}
+                    className="text-sm px-3 py-1 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50"
+                  >
+                    {qbAuthorising ? 'Redirecting...' : 'Authorise with QuickBooks'}
                   </button>
                 )}
                 <button
@@ -385,6 +424,18 @@ export default function IntegrationsPage() {
         <div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg flex items-center justify-between">
           <p className="text-red-700 font-medium">✗ Zoho authorisation failed: {zohoAuthError}</p>
           <button onClick={() => setZohoAuthStatus(null)} className="text-red-500 hover:text-red-700 text-lg">✕</button>
+        </div>
+      )}
+      {qbAuthStatus === 'success' && (
+        <div className="mb-4 p-4 bg-green-50 border border-green-200 rounded-lg flex items-center justify-between">
+          <p className="text-green-700 font-medium">✓ QuickBooks connected successfully! Refresh token and Company ID saved.</p>
+          <button onClick={() => setQbAuthStatus(null)} className="text-green-500 hover:text-green-700 text-lg">✕</button>
+        </div>
+      )}
+      {qbAuthStatus === 'error' && (
+        <div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg flex items-center justify-between">
+          <p className="text-red-700 font-medium">✗ QuickBooks authorisation failed: {qbAuthError}</p>
+          <button onClick={() => setQbAuthStatus(null)} className="text-red-500 hover:text-red-700 text-lg">✕</button>
         </div>
       )}
 

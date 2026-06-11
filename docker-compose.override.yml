@@ -1,0 +1,7 @@
+# Local-dev override: publish MySQL to the host so local uvicorn (CLAUDE.md
+# "How to Start") can reach the DB at localhost:3306. The base compose keeps
+# MySQL on the docker network only for the LAN deployment.
+services:
+  db:
+    ports:
+      - "127.0.0.1:3306:3306"

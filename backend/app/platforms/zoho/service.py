@@ -22,11 +22,15 @@ class ZohoBilling(BillingPlatform):
 
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
+        org_id = config.get("organization_id", "")
         self.auth = ZohoAuth(
             client_id=config.get("client_id", ""),
             client_secret=config.get("client_secret", ""),
             refresh_token=config.get("refresh_token", ""),
             auth_url=config.get("auth_url", "https://accounts.zoho.in/oauth/v2/token"),
+            # Optional list of backup credential sets for rate-limit/auth failover.
+            credentials=config.get("credentials"),
+            pool_name=f"zoho:{org_id}" if org_id else "zoho",
         )
         self.client = ZohoClient(
             auth=self.auth,

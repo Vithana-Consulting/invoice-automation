@@ -27,6 +27,7 @@ from datetime import datetime
 
 from app.config import settings
 from app.core.exceptions import ParsingError
+from app.core.key_pool import KeyExhaustedError, get_key_pool, run_with_rotation
 from app.models.domain import BankDetails, Invoice, LineItem, TaxBreakup
 from app.parsers.base import InvoiceParser
 from app.parsers.llm_providers import get_llm_provider
@@ -414,36 +415,68 @@ class LLMParser(InvoiceParser):
 
     def parse(self, file_path: str, file_type: str,
               buyer_hint: dict | None = None) -> Invoice:
-        api_key = settings.LLM_API_KEY
         provider_name = settings.LLM_PROVIDER.lower()
         model = settings.LLM_MODEL
+        base_url = settings.LLM_BASE_URL
 
-        if not api_key:
+        # LLM_API_KEY may hold a comma/newline-separated POOL of keys. On a rate
+        # limit (429) or failure the pool rotates to the next key so a single
+        # exhausted key never sinks the whole demo.
+        pool = get_key_pool("llm", settings.LLM_API_KEY,
+                            cooldown_seconds=settings.KEY_POOL_COOLDOWN_SECONDS)
+        if len(pool) == 0:
             raise ParsingError(
                 "LLM_API_KEY is not set in .env. "
-                "Set LLM_PROVIDER, LLM_MODEL, and LLM_API_KEY to use the LLM parser."
+                "Set LLM_PROVIDER, LLM_MODEL, and LLM_API_KEY to use the LLM parser. "
+                "Multiple keys can be supplied comma-separated for automatic rotation."
             )
+        if len(pool) > 1:
+            logger.info("LLM parser using a pool of %d API keys (rotation enabled)", len(pool))
 
         ft = file_type.lower().lstrip(".")
         if not self.supports(ft):
             raise ParsingError(f"Unsupported file type: {ft}")
 
+        # Capability probe — provider class decides vision support (key-agnostic,
+        # no API call is made by the constructor).
         try:
-            provider = get_llm_provider(
-                name=provider_name, api_key=api_key,
-                model=model, base_url=settings.LLM_BASE_URL,
+            probe = get_llm_provider(
+                name=provider_name, api_key=pool.acquire(),
+                model=model, base_url=base_url,
             )
         except ValueError as e:
             raise ParsingError(str(e))
 
         # Choose strategy: vision (direct images) or text (OCR → LLM)
-        if provider.supports_vision():
-            return self._parse_with_vision(provider, file_path, ft, provider_name, model, buyer_hint)
+        if probe.supports_vision():
+            return self._parse_with_vision(pool, file_path, ft, provider_name, model, base_url, buyer_hint)
         else:
-            return self._parse_with_text(provider, file_path, ft, provider_name, model, buyer_hint)
+            return self._parse_with_text(pool, file_path, ft, provider_name, model, base_url, buyer_hint)
 
-    def _parse_with_vision(self, provider, file_path: str, ft: str,
-                           provider_name: str, model: str,
+    def _call_llm(self, pool, provider_name: str, model: str, base_url: str,
+                  prompt: str, image_paths: list[str] | None = None) -> str:
+        """Invoke the LLM through the key pool, rotating on rate-limit/failure.
+
+        A fresh provider is built per attempt bound to the active key, so each
+        rotation actually swaps the credential used for the API call.
+        """
+        def _fn(key: str) -> str:
+            provider = get_llm_provider(
+                name=provider_name, api_key=key, model=model, base_url=base_url,
+            )
+            if image_paths is not None:
+                return provider.call_with_images(prompt, image_paths)
+            return provider.call(prompt)
+
+        try:
+            return run_with_rotation(pool, _fn)
+        except KeyExhaustedError as e:
+            raise ParsingError(
+                f"All LLM API keys are rate-limited or failing: {e}"
+            )
+
+    def _parse_with_vision(self, pool, file_path: str, ft: str,
+                           provider_name: str, model: str, base_url: str = "",
                            buyer_hint: dict | None = None) -> Invoice:
         """Send document images directly to the LLM — no OCR needed."""
         tmp_images = []
@@ -473,7 +506,8 @@ class LLMParser(InvoiceParser):
                 if attempt > 1 and last_errors:
                     prompt += _build_correction_section(last_errors, attempt, MAX_PARSE_ATTEMPTS)
 
-                response_text = provider.call_with_images(prompt, image_paths)
+                response_text = self._call_llm(pool, provider_name, model, base_url,
+                                               prompt, image_paths=image_paths)
                 if not response_text:
                     raise ParsingError(f"LLM returned empty response for {file_path}")
 
@@ -544,8 +578,8 @@ class LLMParser(InvoiceParser):
                 except OSError:
                     pass
 
-    def _parse_with_text(self, provider, file_path: str, ft: str,
-                         provider_name: str, model: str,
+    def _parse_with_text(self, pool, file_path: str, ft: str,
+                         provider_name: str, model: str, base_url: str = "",
                          buyer_hint: dict | None = None) -> Invoice:
         """Fallback: OCR → text → LLM (for providers without vision)."""
         from app.parsers.tesseract_parser import TesseractParser
@@ -571,7 +605,7 @@ class LLMParser(InvoiceParser):
                 if attempt > 1 and last_errors:
                     prompt += _build_correction_section(last_errors, attempt, MAX_PARSE_ATTEMPTS)
 
-                response_text = provider.call(prompt)
+                response_text = self._call_llm(pool, provider_name, model, base_url, prompt)
                 last_invoice = self._parse_response(response_text, provider_name, model, file_path)
                 last_invoice.raw_text = raw_text[:50000]
                 last_errors = _validate_invoice(last_invoice)

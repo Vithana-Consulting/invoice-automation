@@ -262,8 +262,22 @@ class QuickBooksBilling(BillingPlatform):
         return [
             {"key": "client_id", "label": "Client ID", "type": "text", "required": True},
             {"key": "client_secret", "label": "Client Secret", "type": "password", "required": True},
-            {"key": "refresh_token", "label": "Refresh Token", "type": "password", "required": True},
-            {"key": "realm_id", "label": "Realm ID (Company ID)", "type": "text", "required": True},
+            {"key": "redirect_uri", "label": "Redirect URI", "type": "text", "required": True,
+             "default": "http://localhost:8000/api/integrations/quickbooks/oauth/callback",
+             "description": (
+                 "Must match a Redirect URI registered in your Intuit app "
+                 "(Developer Portal > Keys & OAuth). Used by the 'Authorise with QuickBooks' button."
+             )},
+            {"key": "refresh_token", "label": "Refresh Token", "type": "password", "required": False,
+             "description": (
+                 "Leave blank — auto-filled after you click 'Authorise with QuickBooks'. "
+                 "Only set manually if you generated a token via the Intuit OAuth Playground."
+             )},
+            {"key": "realm_id", "label": "Realm ID (Company ID)", "type": "text", "required": False,
+             "description": (
+                 "Leave blank — auto-filled from the OAuth callback after authorising. "
+                 "Set manually only if connecting without the Authorise button."
+             )},
             {"key": "base_url", "label": "API Base URL", "type": "text", "required": True,
              "default": "https://sandbox-quickbooks.api.intuit.com"},
             {

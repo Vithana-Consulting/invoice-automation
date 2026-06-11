@@ -14,7 +14,7 @@ EDITABLE_KEYS = {
     "LLAMAPARSE_API_KEY",
     "STORAGE_BACKEND",
     "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET", "GOOGLE_REDIRECT_URI",
-    "FRONTEND_URL", "DEBUG", "MAX_RETRIES",
+    "FRONTEND_URL", "DEBUG", "MAX_RETRIES", "KEY_POOL_COOLDOWN_SECONDS",
 }
 
 # Valid values for enum-style settings
@@ -97,6 +97,10 @@ class Settings(BaseSettings):
     # Retry
     MAX_RETRIES: int = 3
     RETRY_BACKOFF_BASE: float = 2.0
+
+    # API key-pool failover: seconds a key is parked after a rate-limit/failure
+    # before it re-enters the rotation. Applies to LLM, LlamaParse, Zoho, QB.
+    KEY_POOL_COOLDOWN_SECONDS: float = 60.0
 
     # Auth - Google OAuth for web login
     GOOGLE_CLIENT_ID: str = ""

@@ -24,6 +24,9 @@ class QuickBooksAuth:
     """OAuth2 token manager for QuickBooks Online."""
 
     TOKEN_URL = "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer"
+    # Intuit's user-facing consent endpoint. Same for sandbox and production —
+    # only the API base URL differs between environments, not the OAuth host.
+    AUTHORIZE_URL = "https://appcenter.intuit.com/connect/oauth2"
 
     def __init__(self, client_id: str, client_secret: str, refresh_token: str):
         self.client_id = client_id
@@ -51,6 +54,42 @@ class QuickBooksAuth:
         if "refresh_token" in data:
             self.refresh_token = data["refresh_token"]
         return self._access_token
+
+    @staticmethod
+    def exchange_code(client_id: str, client_secret: str, code: str,
+                      redirect_uri: str) -> dict:
+        """Exchange an authorization-code grant for access + refresh tokens.
+
+        Intuit authenticates the token call with HTTP Basic (client_id:client_secret).
+        Returns the full token response dict (contains ``refresh_token``).
+        Raises Exception on failure.
+        """
+        try:
+            resp = httpx.post(
+                QuickBooksAuth.TOKEN_URL,
+                auth=(client_id, client_secret),
+                headers={"Accept": "application/json"},
+                data={
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "redirect_uri": redirect_uri,
+                },
+                timeout=30,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except httpx.HTTPStatusError as e:
+            logger.error("QuickBooks code exchange failed: HTTP %d — %s",
+                         e.response.status_code, e.response.text[:500])
+            raise Exception(
+                f"Code exchange failed: HTTP {e.response.status_code} — {e.response.text[:200]}"
+            )
+        except Exception as e:
+            raise Exception(f"Code exchange failed: {e}")
+
+        if "refresh_token" not in data:
+            raise Exception(f"No refresh_token in QuickBooks response: {data}")
+        return data
 
 
 class QuickBooksClient:
