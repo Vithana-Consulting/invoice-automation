@@ -21,9 +21,20 @@ echo "Building frontend..."
 # BACKEND_INTERNAL_URL is baked in at build time by Next.js. Since frontend
 # and backend run in the same ECS task (same network namespace), localhost
 # is always correct here regardless of the task's public IP.
+#
+# NEXT_PUBLIC_API_URL is DIFFERENT: it gets inlined into the CLIENT-SIDE JS
+# bundle (frontend/src/lib/api.ts) and runs in the end user's browser, not
+# in the container. The Dockerfile's own default for this arg is
+# "http://localhost:8000", which would make every browser try to reach
+# localhost:8000 on the USER'S OWN machine — that's not us, it refuses the
+# connection, and the app breaks past the login screen. We must override it
+# to empty so client fetches stay relative (/api/...), resolving same-origin
+# against whatever hostname the browser is actually on (the sslip.io host),
+# which next.config.js's server-side rewrite then forwards to
+# BACKEND_INTERNAL_URL correctly.
 docker build \
   --build-arg BACKEND_INTERNAL_URL=http://localhost:8000 \
-  --build-arg NEXT_PUBLIC_API_URL=http://localhost:8000 \
+  --build-arg NEXT_PUBLIC_API_URL= \
   -t "$REGISTRY/vithana-frontend:$TAG" "$ROOT_DIR/frontend"
 docker push "$REGISTRY/vithana-frontend:$TAG"
 

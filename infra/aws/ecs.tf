@@ -91,12 +91,13 @@ resource "aws_ecs_task_definition" "app" {
       essential = true
       portMappings = [{ containerPort = 3000, protocol = "tcp" }]
 
-      # Same task = same network namespace, so localhost always reaches the
-      # backend container regardless of the task's (changing) public IP.
-      environment = [
-        { name = "BACKEND_INTERNAL_URL", value = "http://localhost:8000" },
-        { name = "NEXT_PUBLIC_API_URL", value = "http://localhost:8000" },
-      ]
+      # NOTE: Next.js bakes both of these into the build at `npm run build`
+      # time (see scripts/build-and-push.sh) — setting them here as
+      # container runtime env vars has NO effect on the already-compiled
+      # image. Left unset here deliberately so nobody mistakes this for the
+      # place to change them. In particular, do NOT set NEXT_PUBLIC_API_URL
+      # here expecting it to override the client bundle — it can't; it's
+      # frozen into the JS at build time and runs in the end user's browser.
 
       dependsOn = [{ containerName = "backend", condition = "START" }]
 
