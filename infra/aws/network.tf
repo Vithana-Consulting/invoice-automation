@@ -1,6 +1,9 @@
 # Uses the account's default VPC + default public subnets to avoid a NAT
-# Gateway (~$32/mo fixed cost we don't need here). Fargate tasks get a
-# public IP directly from the subnet's Internet Gateway route instead.
+# Gateway (~$32/mo fixed cost we don't need here). The MySQL Fargate task
+# gets a public IP directly from the subnet's Internet Gateway route
+# (needed to pull the mysql:8.0 image with no NAT). App Runner itself is
+# NOT in this VPC — it's a public, internet-facing PaaS by design — it only
+# touches the VPC via the connector below, to privately reach MySQL.
 
 data "aws_vpc" "default" {
   default = true
@@ -13,42 +16,12 @@ data "aws_subnets" "default" {
   }
 }
 
-resource "aws_security_group" "app" {
-  name        = "${var.project}-app"
-  description = "Frontend (3000) + backend (8000) access"
+# ENIs App Runner creates in our VPC to reach MySQL privately (its own
+# public endpoint traffic never touches this SG).
+resource "aws_security_group" "apprunner_connector" {
+  name        = "${var.project}-apprunner-connector"
+  description = "Egress-only SG for the App Runner VPC connector's ENIs"
   vpc_id      = data.aws_vpc.default.id
-
-  ingress {
-    description = "Frontend"
-    from_port   = 3000
-    to_port     = 3000
-    protocol    = "tcp"
-    cidr_blocks = [var.allowed_cidr]
-  }
-
-  ingress {
-    description = "Backend (direct API access / debugging)"
-    from_port   = 8000
-    to_port     = 8000
-    protocol    = "tcp"
-    cidr_blocks = [var.allowed_cidr]
-  }
-
-  ingress {
-    description = "HTTPS via Caddy"
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = [var.allowed_cidr]
-  }
-
-  ingress {
-    description = "HTTP: ACME challenge, must stay open to the internet, plus redirect to HTTPS"
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
 
   egress {
     from_port   = 0
@@ -62,15 +35,15 @@ resource "aws_security_group" "app" {
 
 resource "aws_security_group" "db" {
   name        = "${var.project}-db"
-  description = "MySQL, reachable only from the app task"
+  description = "MySQL, reachable only from the App Runner VPC connector"
   vpc_id      = data.aws_vpc.default.id
 
   ingress {
-    description     = "MySQL from app task"
+    description     = "MySQL from App Runner VPC connector"
     from_port       = 3306
     to_port         = 3306
     protocol        = "tcp"
-    security_groups = [aws_security_group.app.id]
+    security_groups = [aws_security_group.apprunner_connector.id]
   }
 
   egress {
@@ -85,16 +58,8 @@ resource "aws_security_group" "db" {
 
 resource "aws_security_group" "efs" {
   name        = "${var.project}-efs"
-  description = "NFS from app + db tasks"
+  description = "NFS from the db task (mysql data only now — attachments moved to S3)"
   vpc_id      = data.aws_vpc.default.id
-
-  ingress {
-    description     = "NFS from app task"
-    from_port       = 2049
-    to_port         = 2049
-    protocol        = "tcp"
-    security_groups = [aws_security_group.app.id]
-  }
 
   ingress {
     description     = "NFS from db task"

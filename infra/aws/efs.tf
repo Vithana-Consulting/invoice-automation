@@ -2,9 +2,9 @@
 # task restart). Billed per GB actually stored, no fixed per-mount charge.
 
 resource "aws_efs_file_system" "data" {
-  creation_token   = "${var.project}-data"
-  encrypted        = true
-  throughput_mode  = "bursting"
+  creation_token  = "${var.project}-data"
+  encrypted       = true
+  throughput_mode = "bursting"
 
   lifecycle_policy {
     transition_to_ia = "AFTER_30_DAYS"
@@ -40,22 +40,5 @@ resource "aws_efs_access_point" "mysql_data" {
   tags = { Project = var.project, Purpose = "mysql-data" }
 }
 
-resource "aws_efs_access_point" "attachments" {
-  file_system_id = aws_efs_file_system.data.id
-
-  posix_user {
-    uid = 1000
-    gid = 1000
-  }
-
-  root_directory {
-    path = "/attachments"
-    creation_info {
-      owner_uid   = 1000
-      owner_gid   = 1000
-      permissions = "755"
-    }
-  }
-
-  tags = { Project = var.project, Purpose = "attachments" }
-}
+# Attachments moved to S3 (see s3.tf) — App Runner has no EFS-equivalent
+# mount, unlike the Fargate app task this replaced.

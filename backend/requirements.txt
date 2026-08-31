@@ -33,6 +33,11 @@ google-api-python-client>=2.100.0
 google-auth-httplib2>=0.2.0
 google-auth-oauthlib>=1.2.0
 
+# S3 file storage backend (STORAGE_BACKEND=s3) — uses the default boto3
+# credential chain (IAM instance role on AWS App Runner/EC2/ECS; env vars
+# or ~/.aws/credentials for local dev). No access-key config fields needed.
+boto3>=1.34.0
+
 # File upload support
 python-multipart>=0.0.7
 

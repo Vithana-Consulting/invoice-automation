@@ -19,7 +19,7 @@ EDITABLE_KEYS = {
 
 # Valid values for enum-style settings
 VALID_PARSER_MODES = {"tesseract", "llamaparse", "llm"}
-VALID_STORAGE_BACKENDS = {"local", "google_drive"}
+VALID_STORAGE_BACKENDS = {"local", "google_drive", "s3"}
 
 # Keys that should be masked in API responses (secrets)
 SECRET_KEYS = {
@@ -90,9 +90,15 @@ class Settings(BaseSettings):
     # LlamaParse (optional parser)
     LLAMAPARSE_API_KEY: str = ""
 
-    # File storage: local | google_drive
+    # File storage: local | google_drive | s3
     ATTACHMENT_DIR: str = "data/attachments"
     STORAGE_BACKEND: str = "local"
+
+    # S3 backend (STORAGE_BACKEND=s3) — no access-key fields on purpose: in
+    # production (AWS App Runner) boto3 picks up credentials from the IAM
+    # instance role via the standard default credential chain.
+    S3_BUCKET_NAME: str = ""
+    S3_REGION: str = "us-east-1"
 
     # Retry
     MAX_RETRIES: int = 3

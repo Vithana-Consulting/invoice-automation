@@ -1,5 +1,9 @@
-resource "aws_ecr_repository" "backend" {
-  name                 = "${var.project}-backend"
+# Single combined image for App Runner (frontend+backend in one container —
+# App Runner runs exactly one container per service, see
+# infra/aws/apprunner/Dockerfile). Replaces the separate backend/frontend/
+# caddy repos from the earlier Fargate-based design.
+resource "aws_ecr_repository" "app" {
+  name                 = "${var.project}-app"
   image_tag_mutability = "MUTABLE"
 
   image_scanning_configuration {
@@ -7,60 +11,9 @@ resource "aws_ecr_repository" "backend" {
   }
 }
 
-resource "aws_ecr_repository" "frontend" {
-  name                 = "${var.project}-frontend"
-  image_tag_mutability = "MUTABLE"
-
-  image_scanning_configuration {
-    scan_on_push = true
-  }
-}
-
-resource "aws_ecr_repository" "caddy" {
-  name                 = "${var.project}-caddy"
-  image_tag_mutability = "MUTABLE"
-
-  image_scanning_configuration {
-    scan_on_push = true
-  }
-}
-
-# Keep only the last 5 images per repo so ECR storage doesn't creep up in cost.
-resource "aws_ecr_lifecycle_policy" "backend" {
-  repository = aws_ecr_repository.backend.name
-  policy     = jsonencode({
-    rules = [{
-      rulePriority = 1
-      description  = "Keep last 5 images"
-      selection = {
-        tagStatus   = "any"
-        countType   = "imageCountMoreThan"
-        countNumber = 5
-      }
-      action = { type = "expire" }
-    }]
-  })
-}
-
-resource "aws_ecr_lifecycle_policy" "frontend" {
-  repository = aws_ecr_repository.frontend.name
-  policy     = jsonencode({
-    rules = [{
-      rulePriority = 1
-      description  = "Keep last 5 images"
-      selection = {
-        tagStatus   = "any"
-        countType   = "imageCountMoreThan"
-        countNumber = 5
-      }
-      action = { type = "expire" }
-    }]
-  })
-}
-
-resource "aws_ecr_lifecycle_policy" "caddy" {
-  repository = aws_ecr_repository.caddy.name
-  policy     = jsonencode({
+resource "aws_ecr_lifecycle_policy" "app" {
+  repository = aws_ecr_repository.app.name
+  policy = jsonencode({
     rules = [{
       rulePriority = 1
       description  = "Keep last 5 images"

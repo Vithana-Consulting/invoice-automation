@@ -15,7 +15,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 import re
 from datetime import datetime
 from io import BytesIO
@@ -34,6 +33,7 @@ from app.db.repository import AdhocUploadRepository
 from app.db.session import db_session, get_db
 from app.models.db_models import AdhocInvoiceUpload, Company, User
 from app.parsers import get_parser
+from app.services import attachment_storage
 from app.tenant.context import TenantContext
 
 logger = logging.getLogger(__name__)
@@ -103,14 +103,11 @@ async def parse_adhoc_upload(
         raise HTTPException(status_code=400, detail=f"Unsupported file type: .{ext}")
 
     safe_name = re.sub(r"[^a-zA-Z0-9._-]", "_", file.filename or "upload")
-    adhoc_dir = os.path.join(settings.ATTACHMENT_DIR, "adhoc")
-    os.makedirs(adhoc_dir, exist_ok=True)
-    file_path = os.path.join(adhoc_dir, f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{safe_name}")
+    timestamped_name = f"{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{safe_name}"
 
     content = await file.read()
-    with open(file_path, "wb") as f:
-        f.write(content)
     content_hash = hashlib.sha256(content).hexdigest()
+    file_path = attachment_storage.save(company_id, timestamped_name, content, subdir="adhoc")
 
     # ── Short session: auth-user email, buyer hint, dedup ──────────────────
     uploaded_by_email = None
@@ -267,8 +264,5 @@ def delete_adhoc_upload(
 
 
 def _safe_remove(path: str) -> None:
-    try:
-        if path and os.path.exists(path):
-            os.remove(path)
-    except OSError:
-        pass
+    """Best-effort delete via the storage-backend-aware module (local or S3)."""
+    attachment_storage.delete(path)

@@ -10,12 +10,6 @@ variable "project" {
   default     = "vithana"
 }
 
-variable "allowed_cidr" {
-  description = "CIDR block allowed to reach the app on 3000/8000. Restrict this to your office/VPN IP for an internal tool."
-  type        = string
-  default     = "0.0.0.0/0"
-}
-
 variable "mysql_root_password" {
   description = "MySQL root password"
   type        = string
@@ -66,32 +60,32 @@ variable "google_client_secret" {
   default   = ""
 }
 
-variable "backend_image" {
-  description = "Full ECR image URI:tag for the backend. Leave blank on first apply (ECR repo is created first, then push, then set this)."
+variable "app_image" {
+  description = "Full ECR image URI:tag for the combined frontend+backend App Runner image. Leave blank on first apply (ECR repo is created first, then push, then set this)."
   type        = string
   default     = ""
 }
 
-variable "frontend_image" {
-  description = "Full ECR image URI:tag for the frontend."
+variable "s3_bucket_name" {
+  description = "S3 bucket name for invoice attachment storage (App Runner has no persistent volume, unlike the EFS-backed Fargate setup this replaced)."
   type        = string
   default     = ""
 }
 
-variable "caddy_image" {
-  description = "Full ECR image URI:tag for the Caddy TLS front door."
+variable "apprunner_cpu" {
+  description = "App Runner vCPU units: 1024 (1 vCPU), 2048 (2 vCPU), etc."
   type        = string
-  default     = ""
+  default     = "1024"
 }
 
-variable "app_desired_count" {
-  description = "0 = asleep (no charge for compute). Set to 1 to wake."
-  type        = number
-  default     = 0
+variable "apprunner_memory" {
+  description = "App Runner memory in MB: must be a valid App Runner cpu/memory combination."
+  type        = string
+  default     = "3072"
 }
 
 variable "db_desired_count" {
-  description = "0 = asleep. Set to 1 to wake. Must be woken together with the app service."
+  description = "0 = asleep (no compute billed). Set to 1 to wake. Must be woken/slept together with the App Runner service via the wake.sh/sleep.sh scripts."
   type        = number
   default     = 0
 }

@@ -13,14 +13,14 @@ resource "aws_secretsmanager_secret_version" "app" {
   secret_id = aws_secretsmanager_secret.app.id
   secret_string = jsonencode({
     MYSQL_ROOT_PASSWORD        = var.mysql_root_password
-    MYSQL_PASSWORD              = var.mysql_password
-    DATABASE_URL                 = "mysql+pymysql://accounting:${var.mysql_password}@${aws_service_discovery_service.db.name}.${var.project}.internal:3306/accounting_automation"
-    JWT_SECRET_KEY               = var.jwt_secret_key
-    ADMIN_API_KEY                = var.admin_api_key
-    INTEGRATION_ENCRYPTION_KEY   = var.integration_encryption_key
-    LLM_API_KEY                  = var.llm_api_key
-    LLAMAPARSE_API_KEY           = var.llamaparse_api_key
-    GOOGLE_CLIENT_ID              = var.google_client_id
-    GOOGLE_CLIENT_SECRET         = var.google_client_secret
+    MYSQL_PASSWORD             = var.mysql_password
+    DATABASE_URL               = "mysql+pymysql://accounting:${var.mysql_password}@${aws_service_discovery_service.db.name}.${var.project}.internal:3306/accounting_automation"
+    JWT_SECRET_KEY             = var.jwt_secret_key
+    ADMIN_API_KEY              = var.admin_api_key
+    INTEGRATION_ENCRYPTION_KEY = var.integration_encryption_key
+    LLM_API_KEY                = var.llm_api_key
+    LLAMAPARSE_API_KEY         = var.llamaparse_api_key
+    GOOGLE_CLIENT_ID           = var.google_client_id
+    GOOGLE_CLIENT_SECRET       = var.google_client_secret
   })
 }

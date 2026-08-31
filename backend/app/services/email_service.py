@@ -14,8 +14,10 @@ from app.config import settings
 from app.core.exceptions import EmailFetchError
 from app.db.repository import AuditLogRepository, EmailRepository, InvoiceRepository
 from app.models.db_models import InvoiceRecord, ProcessedEmail
+from app.services import attachment_storage
 from app.services.invoice_service import InvoiceService
 from app.services.drive_upload import try_drive_upload
+from app.tenant.context import TenantContext
 
 logger = logging.getLogger(__name__)
 
@@ -239,26 +241,26 @@ class EmailService:
             return
 
         self.email_repo.update_status(email_record.id, "PROCESSING")
-        msg_dir = os.path.join(settings.ATTACHMENT_DIR, msg_id)
-        os.makedirs(msg_dir, exist_ok=True)
+        company_id = TenantContext.get_optional()
 
         invoice_service = InvoiceService(self.db)
 
         for att in attachments:
             try:
-                file_path = self._download_attachment(service, msg_id, att, msg_dir)
+                data = self._fetch_attachment_bytes(service, msg_id, att)
                 stats["attachments_downloaded"] += 1
 
-                sha = hashlib.sha256()
-                with open(file_path, "rb") as f:
-                    for chunk in iter(lambda: f.read(8192), b""):
-                        sha.update(chunk)
-                content_hash = sha.hexdigest()
+                content_hash = hashlib.sha256(data).hexdigest()
 
                 existing = self.invoice_repo.get_by_content_hash(content_hash)
                 if existing:
                     logger.info("Duplicate attachment: %s", att["filename"])
                     continue
+
+                # save() routes to local disk or S3 depending on STORAGE_BACKEND;
+                # subdir=msg_id preserves the pre-existing local directory layout.
+                file_path = attachment_storage.save(company_id, att["filename"], data, subdir=msg_id)
+                logger.info("Saved attachment: %s (%d bytes)", att["filename"], len(data))
 
                 ext = os.path.splitext(att["filename"])[1].lower().lstrip(".")
                 invoice_record = InvoiceRecord(
@@ -299,7 +301,7 @@ class EmailService:
             attachments.extend(self._find_attachments(part))
         return attachments
 
-    def _download_attachment(self, service, msg_id: str, att: dict, dest_dir: str) -> str:
+    def _fetch_attachment_bytes(self, service, msg_id: str, att: dict) -> bytes:
         attachment = (
             service.users()
             .messages()
@@ -307,12 +309,7 @@ class EmailService:
             .get(userId="me", messageId=msg_id, id=att["attachment_id"])
             .execute()
         )
-        data = base64.urlsafe_b64decode(attachment["data"])
-        file_path = os.path.join(dest_dir, att["filename"])
-        with open(file_path, "wb") as f:
-            f.write(data)
-        logger.info("Downloaded attachment: %s (%d bytes)", att["filename"], len(data))
-        return file_path
+        return base64.urlsafe_b64decode(attachment["data"])
 
 
 def redownload_invoice_from_gmail(invoice, db) -> str | None:
@@ -381,11 +378,9 @@ def redownload_invoice_from_gmail(invoice, db) -> str | None:
         ).execute()
         data = base64.urlsafe_b64decode(attachment["data"])
 
-        # Restore to original path
-        dest = os.path.abspath(invoice.file_path)
-        os.makedirs(os.path.dirname(dest), exist_ok=True)
-        with open(dest, "wb") as f:
-            f.write(data)
+        # Restore to original path (local path or s3:// URI, unchanged either way)
+        dest = invoice.file_path if attachment_storage.is_remote(invoice.file_path) else os.path.abspath(invoice.file_path)
+        attachment_storage.write_bytes(dest, data)
 
         logger.info("Re-downloaded %s from Gmail message %s (%d bytes)", file_name, msg_id, len(data))
         return dest

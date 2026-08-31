@@ -50,16 +50,45 @@ class InvoiceParser(ABC):
     def _prepare_source(file_path: str, file_type: str) -> Tuple[str, str, Callable[[], None]]:
         """Normalise a source document for the PDF/image parse pipeline.
 
-        Word documents (.doc/.docx) are transparently converted to a temporary
-        PDF ("convert-then-parse"); every other type is passed through unchanged.
+        Two independent normalisation steps, both transparent to callers:
+          1. Remote acquisition — when STORAGE_BACKEND=s3, `file_path` is an
+             ``s3://`` URI. Tesseract/pdf2image/LibreOffice all require an
+             actual local file, so it's downloaded to a `tempfile` first.
+          2. Word documents (.doc/.docx) are converted to a temporary PDF
+             ("convert-then-parse"); every other type passes through unchanged.
 
         Returns ``(path, normalized_extension, cleanup)`` — call ``cleanup()`` in
         a ``finally`` block to remove any temporary artifacts created here.
         """
+        from app.services.attachment_storage import is_remote, download_to_temp
+
         ft = file_type.lower().lstrip(".")
+        cleanups: list[Callable[[], None]] = []
+
+        local_path = file_path
+        if is_remote(file_path):
+            local_path, s3_cleanup = download_to_temp(file_path)
+            cleanups.append(s3_cleanup)
+
         if ft in WORD_TYPES:
             from app.utils.document_converter import convert_word_to_pdf
-            pdf_path = convert_word_to_pdf(file_path)
+            try:
+                pdf_path = convert_word_to_pdf(local_path)
+            except Exception:
+                for c in cleanups:
+                    c()
+                raise
             tmp_dir = os.path.dirname(pdf_path)
-            return pdf_path, "pdf", lambda: shutil.rmtree(tmp_dir, ignore_errors=True)
-        return file_path, ft, lambda: None
+            cleanups.append(lambda: shutil.rmtree(tmp_dir, ignore_errors=True))
+            result_path, result_ft = pdf_path, "pdf"
+        else:
+            result_path, result_ft = local_path, ft
+
+        def cleanup() -> None:
+            for c in cleanups:
+                try:
+                    c()
+                except Exception:
+                    pass
+
+        return result_path, result_ft, cleanup

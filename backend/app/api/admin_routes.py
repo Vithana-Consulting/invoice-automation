@@ -29,6 +29,7 @@ from app.models.db_models import (
     ProcessedEmail, Rule, User, VendorCache, VendorMapping,
 )
 from app.platforms.base import decrypt_config, encrypt_config
+from app.services import attachment_storage
 from app.tenant.views import create_company_views, drop_company_views
 
 logger = logging.getLogger(__name__)
@@ -436,7 +437,8 @@ def flush_company(company_id: int, db: Session = Depends(get_db)):
         except Exception as e:
             results[table] = f"error: {e}"
 
-    # Delete company attachments
+    # Delete company attachments (local dir, plus this company's S3 prefix when
+    # STORAGE_BACKEND=s3 — delete_prefix() is a no-op for the local backend)
     attachment_dir = os.path.join(settings.ATTACHMENT_DIR, str(company_id))
     if os.path.exists(attachment_dir):
         file_count = sum(1 for _, _, files in os.walk(attachment_dir) for _ in files)
@@ -445,6 +447,7 @@ def flush_company(company_id: int, db: Session = Depends(get_db)):
         results["attachments_deleted"] = file_count
     else:
         results["attachments_deleted"] = 0
+    results["s3_attachments_deleted"] = attachment_storage.delete_prefix(company_id)
 
     db.commit()
     total_rows = sum(v for v in results.values() if isinstance(v, int))
@@ -470,6 +473,7 @@ def flush_all(db: Session = Depends(get_db)):
         results["attachments_deleted"] = file_count
     else:
         results["attachments_deleted"] = 0
+    results["s3_attachments_deleted"] = attachment_storage.delete_all()
 
     for table in FLUSH_TABLES:
         try:

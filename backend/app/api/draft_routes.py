@@ -12,6 +12,7 @@ from app.auth.dependencies import get_current_user, get_optional_user
 from app.db.repository import AuditLogRepository, DraftRepository, InvoiceRepository, RuleRepository
 from app.db.session import get_db
 from app.models.db_models import User
+from app.services import attachment_storage
 from app.services.draft_service import DraftService  # noqa: F401 — also used in reparse_draft
 
 logger = logging.getLogger(__name__)
@@ -130,9 +131,9 @@ def reparse_draft(draft_id: int, db: Session = Depends(get_db)):
     if not draft:
         raise HTTPException(status_code=404, detail="Draft not found")
 
-    # If the PDF is missing from disk, try to recover it from Gmail before reparsing
+    # If the file is missing from storage, try to recover it from Gmail before reparsing
     invoice = InvoiceRepository(db).get_by_id(draft.invoice_id)
-    if invoice and invoice.file_path and not os.path.exists(invoice.file_path):
+    if invoice and invoice.file_path and not attachment_storage.exists(invoice.file_path):
         if invoice.source == "gmail":
             from app.services.email_service import redownload_invoice_from_gmail
             recovered = redownload_invoice_from_gmail(invoice, db)
@@ -378,57 +379,60 @@ def _run_post_push_pipeline(draft, bill_id: str, platform: str, db) -> dict:
     if platform != "zoho" or not bill_id:
         return result
 
-    # Resolve absolute file path (stored path may be relative to backend root)
+    # Resolve absolute file path (stored path may be relative to backend root;
+    # an s3:// URI is already absolute in the sense that matters here).
     invoice = InvoiceRepository(db).get_by_id(draft.invoice_id)
     if not invoice or not invoice.file_path:
         result["attach"] = "skipped — no file_path on invoice record"
         return result
 
     file_path = invoice.file_path
-    if not os.path.isabs(file_path):
-        from app.config import settings
+    if not attachment_storage.is_remote(file_path) and not os.path.isabs(file_path):
         # Resolve relative to the project root (parent of data/)
         file_path = os.path.abspath(file_path)
 
     result["file"] = file_path
 
-    if not os.path.exists(file_path):
-        logger.info("[PIPELINE] Stage 3/4 — PDF not on disk, attempting Gmail re-download: %s", file_path)
+    if not attachment_storage.exists(file_path):
+        logger.info("[PIPELINE] Stage 3/4 — PDF not in storage, attempting Gmail re-download: %s", file_path)
         from app.services.email_service import redownload_invoice_from_gmail
         recovered = redownload_invoice_from_gmail(invoice, db)
         if recovered:
             file_path = recovered
             result["file"] = file_path
         else:
-            result["attach"] = "skipped — file not on disk and Gmail re-download unavailable"
+            result["attach"] = "skipped — file not in storage and Gmail re-download unavailable"
             logger.warning("[PIPELINE] Stage 3/4 — Could not recover PDF, skipping attachment")
             return result
 
-    # Stage 3: attach
+    # Stage 3: attach — Zoho's client needs an actual local file, so fetch one
+    # from S3 to a temp path when the backend is s3 (no-op for local).
     logger.info("[PIPELINE] Stage 3/4 — Attach %s to Zoho bill %s", invoice.file_name, bill_id)
     try:
         from app.platforms.base import get_billing_platform
         zoho = get_billing_platform(db, "zoho")
-        zoho.client.attach_document(bill_id, file_path)
+        with attachment_storage.open_for_read(file_path) as local_path:
+            zoho.client.attach_document(bill_id, local_path)
         result["attach"] = "ok"
         logger.info("[PIPELINE] Stage 3/4 — Attached successfully")
         DraftRepository(db).update(draft.id, pdf_attached_at=datetime.utcnow())
         db.commit()
     except Exception as exc:
         result["attach"] = f"failed — {exc}"
-        logger.warning("[PIPELINE] Stage 3/4 — Attachment failed, keeping local file: %s", exc)
+        logger.warning("[PIPELINE] Stage 3/4 — Attachment failed, keeping stored file: %s", exc)
         return result  # do NOT clean up if attachment failed
 
     # Stage 4: cleanup — only reached when attachment succeeded
-    logger.info("[PIPELINE] Stage 4/4 — Cleanup local file: %s", file_path)
+    logger.info("[PIPELINE] Stage 4/4 — Cleanup stored file: %s", file_path)
     try:
-        os.remove(file_path)
-        # Remove parent directory if now empty
-        parent = os.path.dirname(file_path)
-        if parent and os.path.isdir(parent) and not os.listdir(parent):
-            os.rmdir(parent)
+        attachment_storage.delete(file_path)
+        # Remove parent directory if now empty (local backend only)
+        if not attachment_storage.is_remote(file_path):
+            parent = os.path.dirname(file_path)
+            if parent and os.path.isdir(parent) and not os.listdir(parent):
+                os.rmdir(parent)
         result["cleanup"] = "ok"
-        logger.info("[PIPELINE] Stage 4/4 — Local file deleted")
+        logger.info("[PIPELINE] Stage 4/4 — Stored file deleted")
     except Exception as exc:
         result["cleanup"] = f"failed — {exc}"
         logger.warning("[PIPELINE] Stage 4/4 — Cleanup failed: %s", exc)
@@ -473,19 +477,21 @@ async def reattach_invoice_to_bill(
     try:
         from app.platforms.base import get_billing_platform
 
+        stored_file_path = None  # non-None only when it's a source_file_path we should clean up
+
         if invoice.source == "gmail":
             # Re-download from Gmail — no file upload required
             from app.services.email_service import redownload_invoice_from_gmail
-            local_path = invoice.file_path if os.path.exists(invoice.file_path or "") else None
-            if not local_path:
-                local_path = redownload_invoice_from_gmail(invoice, db)
-            if not local_path:
+            source_file_path = invoice.file_path if attachment_storage.exists(invoice.file_path or "") else None
+            if not source_file_path:
+                source_file_path = redownload_invoice_from_gmail(invoice, db)
+            if not source_file_path:
                 raise HTTPException(
                     status_code=422,
                     detail="Could not re-download from Gmail. Check that the Gmail integration is connected and the original email is not deleted.",
                 )
             file_used = invoice.file_name
-            attach_path = local_path
+            stored_file_path = source_file_path
         else:
             # Manual upload source — file must be provided
             if file is None:
@@ -496,10 +502,11 @@ async def reattach_invoice_to_bill(
                 tmp.write(content)
                 tmp_path = tmp.name
             file_used = file.filename
-            attach_path = tmp_path
+            source_file_path = tmp_path
 
         zoho = get_billing_platform(db, "zoho")
-        zoho.client.attach_document(draft.external_bill_id, attach_path)
+        with attachment_storage.open_for_read(source_file_path) as attach_path:
+            zoho.client.attach_document(draft.external_bill_id, attach_path)
         logger.info("Reattached %s to Zoho bill %s", file_used, draft.external_bill_id)
 
         AuditLogRepository(db).log(
@@ -510,14 +517,17 @@ async def reattach_invoice_to_bill(
         DraftRepository(db).update(draft_id, pdf_attached_at=datetime.utcnow())
         db.commit()
 
-        # Cleanup: delete the local file now that it's safely in Zoho
-        try:
-            os.remove(attach_path)
-            parent = os.path.dirname(attach_path)
-            if parent and os.path.isdir(parent) and not os.listdir(parent):
-                os.rmdir(parent)
-        except Exception:
-            pass
+        # Cleanup: delete the stored source file now that it's safely in Zoho
+        # (the tmp_path upload branch is cleaned up separately in `finally` below).
+        if stored_file_path:
+            attachment_storage.delete(stored_file_path)
+            if not attachment_storage.is_remote(stored_file_path):
+                parent = os.path.dirname(stored_file_path)
+                if parent and os.path.isdir(parent) and not os.listdir(parent):
+                    try:
+                        os.rmdir(parent)
+                    except OSError:
+                        pass
 
     except HTTPException:
         raise
