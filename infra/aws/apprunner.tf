@@ -93,7 +93,11 @@ resource "aws_apprunner_service" "app" {
   auto_scaling_configuration_arn = aws_apprunner_auto_scaling_configuration_version.this.arn
 
   health_check_configuration {
-    protocol = "TCP" # HTTP health check would need a path that's always 200 regardless of auth state; TCP is simpler and matches how the Fargate setup had no ALB-style health check either
+    protocol            = "TCP" # HTTP health check would need a path that's always 200 regardless of auth state; TCP is simpler and matches how the Fargate setup had no ALB-style health check either
+    interval            = 10
+    timeout             = 5
+    healthy_threshold   = 1
+    unhealthy_threshold = 10 # generous — a cold first deployment has real extra overhead (VPC connector ENI attachment, ~2GB Tesseract/LibreOffice/Node image) that a warm local Docker test doesn't reproduce; the previous defaults (2s timeout, 5 fails at 5s = 25s total budget) may not have given it enough room
   }
 
   tags = { Project = var.project }
