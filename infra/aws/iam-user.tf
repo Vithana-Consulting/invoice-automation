@@ -128,6 +128,12 @@ resource "aws_iam_policy" "deployer" {
         Effect   = "Allow"
         Action   = ["sts:GetCallerIdentity"]
         Resource = ["*"]
+      },
+      {
+        Sid      = "Budgets"
+        Effect   = "Allow"
+        Action   = ["budgets:*"]
+        Resource = ["*"] # AWS Budgets ARNs aren't known until after create; scoping further isn't practical here
       }
     ]
   })
