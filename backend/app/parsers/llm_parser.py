@@ -34,7 +34,10 @@ from app.parsers.llm_providers import get_llm_provider
 
 logger = logging.getLogger(__name__)
 
-MAX_PARSE_ATTEMPTS = 3
+MAX_PARSE_ATTEMPTS = 2  # lowered from 3 — with a single-key pool, each extra
+# retry on a bad GSTIN/PAN read costs another OpenAI call and, worse, another
+# chance to hit a transient failure that parks the only key for 60s and stalls
+# the rest of the batch (see email_service.py's MAX_PARSES_PER_RUN)
 
 # doc/docx are converted to PDF first (convert-then-parse) — see InvoiceParser._prepare_source
 SUPPORTED_TYPES = {"pdf", "jpg", "jpeg", "png", "tiff", "tif", "bmp", "doc", "docx"}

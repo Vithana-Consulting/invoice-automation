@@ -36,6 +36,15 @@ MIME_TYPE_MAP = {
 # 200 messages/page * 25 pages = 5000 messages max per run; remainder picked up next run.
 MAX_LIST_PAGES = 25
 
+# Cap parse attempts per fetch_and_process() run. With a single-key LLM pool,
+# one transient failure parks the only key for 60s and stalls everything
+# behind it (see llm_parser.py's MAX_PARSE_ATTEMPTS comment) — running large
+# batches straight through made that cascade far worse than it needed to be.
+# Attachments beyond this cap are still downloaded and saved as PENDING
+# InvoiceRecords (not lost, not re-fetched), just not parsed this run —
+# reparse-all or the next scheduled run picks them up.
+MAX_PARSES_PER_RUN = 10
+
 
 class EmailService:
     def __init__(self, db: Session, gmail_service=None, label: str = None):
@@ -149,10 +158,17 @@ class EmailService:
             "skipped_existing": 0,
             "attachments_downloaded": 0,
             "invoices_parsed": 0,
+            "parse_attempts": 0,  # gates MAX_PARSES_PER_RUN; incremented even on failed attempts
             "errors": [],
         }
 
         for thread_id in thread_ids:
+            if stats["parse_attempts"] >= MAX_PARSES_PER_RUN:
+                logger.info(
+                    "Reached MAX_PARSES_PER_RUN (%d) — stopping this run early; "
+                    "remaining threads picked up next run.", MAX_PARSES_PER_RUN,
+                )
+                break
             try:
                 self._process_thread(service, thread_id, stats)
             except Exception as e:
@@ -181,6 +197,8 @@ class EmailService:
             .execute()
         )
         for msg in thread.get("messages", []):
+            if stats["parse_attempts"] >= MAX_PARSES_PER_RUN:
+                break
             msg_id = msg["id"]
             if self.email_repo.exists(msg_id):
                 stats["skipped_existing"] += 1
@@ -278,6 +296,12 @@ class EmailService:
                 if drive_file_id:
                     self.invoice_repo._update(invoice_record.id, drive_file_id=drive_file_id)
 
+                if stats["parse_attempts"] >= MAX_PARSES_PER_RUN:
+                    # Batch cap reached — record saved as PENDING (not lost),
+                    # just not parsed this run. reparse-all / next run handles it.
+                    continue
+
+                stats["parse_attempts"] += 1
                 if invoice_service.parse_invoice(invoice_record.id):
                     stats["invoices_parsed"] += 1
 
