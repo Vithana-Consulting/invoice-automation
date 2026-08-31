@@ -91,10 +91,6 @@ resource "aws_ecs_service" "db" {
   network_configuration {
     subnets          = data.aws_subnets.default.ids
     security_groups  = [aws_security_group.db.id]
-    assign_public_ip = true # required to reach the internet (pull mysql:8.0) since we have no NAT gateway; SG still blocks all inbound except from the App Runner VPC connector
-  }
-
-  service_registries {
-    registry_arn = aws_service_discovery_service.db.arn
+    assign_public_ip = true # required to reach the internet (pull mysql:8.0) since we have no NAT gateway — also now how App Runner reaches it, via the fixed Elastic IP in eip.tf
   }
 }

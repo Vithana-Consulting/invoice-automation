@@ -2,28 +2,12 @@
 # sidecar — App Runner terminates TLS itself and gives a stable
 # https://<id>.<region>.awsapprunner.com URL, so there's no on-demand-TLS/
 # sslip.io machinery needed here at all.
-
-# App Runner's VPC connector doesn't support every AZ in every region/account
-# — this account's use1-az3 isn't supported. Excluding the one subnet that
-# lands there; the remaining subnets (5 of the default VPC's 6) are plenty
-# for the connector.
-data "aws_subnet" "default_azs" {
-  for_each = toset(data.aws_subnets.default.ids)
-  id       = each.value
-}
-
-locals {
-  apprunner_connector_subnets = [
-    for id, subnet in data.aws_subnet.default_azs : id
-    if subnet.availability_zone_id != "use1-az3"
-  ]
-}
-
-resource "aws_apprunner_vpc_connector" "this" {
-  vpc_connector_name = "${var.project}-connector"
-  subnets            = local.apprunner_connector_subnets
-  security_groups    = [aws_security_group.apprunner_connector.id]
-}
+#
+# No VPC connector: default (public internet) egress. An earlier version
+# used a VPC connector so App Runner could reach MySQL privately, but that
+# requires a NAT Gateway once real internet access (OpenAI, LlamaParse,
+# Google OAuth) is also needed — see network.tf and eip.tf for how MySQL is
+# reached instead (public internet, fixed Elastic IP, password-secured).
 
 # App Runner's own auto-scaling config. MinSize=1 — unlike the Fargate
 # desired_count=0 pattern, App Runner has no automatic scale-to-zero; the
@@ -83,13 +67,6 @@ resource "aws_apprunner_service" "app" {
     instance_role_arn = aws_iam_role.apprunner_instance.arn
   }
 
-  network_configuration {
-    egress_configuration {
-      egress_type       = "VPC"
-      vpc_connector_arn = aws_apprunner_vpc_connector.this.arn
-    }
-  }
-
   auto_scaling_configuration_arn = aws_apprunner_auto_scaling_configuration_version.this.arn
 
   health_check_configuration {
@@ -97,7 +74,7 @@ resource "aws_apprunner_service" "app" {
     interval            = 10
     timeout             = 5
     healthy_threshold   = 1
-    unhealthy_threshold = 10 # generous — a cold first deployment has real extra overhead (VPC connector ENI attachment, ~2GB Tesseract/LibreOffice/Node image) that a warm local Docker test doesn't reproduce; the previous defaults (2s timeout, 5 fails at 5s = 25s total budget) may not have given it enough room
+    unhealthy_threshold = 10 # generous headroom for a cold first deployment (~2GB Tesseract/LibreOffice/Node image)
   }
 
   tags = { Project = var.project }
