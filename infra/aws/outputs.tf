@@ -26,3 +26,8 @@ output "s3_attachments_bucket" {
 output "secret_arn" {
   value = aws_secretsmanager_secret.app.arn
 }
+
+output "deployer_iam_user" {
+  description = "Run `aws iam create-access-key --user-name <this>` to get real credentials for this user — the access key itself is NOT a Terraform resource (see iam-user.tf)."
+  value       = aws_iam_user.deployer.name
+}
