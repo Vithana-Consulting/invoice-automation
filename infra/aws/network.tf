@@ -43,7 +43,7 @@ resource "aws_security_group" "app" {
   }
 
   ingress {
-    description = "HTTP: ACME challenge (must stay open to the internet — Let's Encrypt validates from many source IPs) + redirect to HTTPS"
+    description = "HTTP: ACME challenge, must stay open to the internet, plus redirect to HTTPS"
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
