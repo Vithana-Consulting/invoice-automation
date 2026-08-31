@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
-# Scales the MySQL Fargate task to 1, updates DATABASE_URL in Secrets
-# Manager with its fresh public IP (a new ENI/IP every time the task
-# starts — an Elastic IP would avoid this, but AWS is rejecting EIP
-# association on this account with AuthFailure, likely a new-account
-# restriction; see README), force-redeploys App Runner so it picks up the
-# new secret value (secrets are only read at container start), then waits
-# for App Runner to come back up.
+# 1. Scales the MySQL Fargate task to 1.
+# 2. Updates DATABASE_URL in Secrets Manager with its fresh public IP (a new
+#    ENI/IP every time the task starts — an Elastic IP would avoid this, but
+#    AWS is rejecting EIP association on this account with AuthFailure,
+#    likely a new-account restriction; see README).
+# 3. Resumes App Runner if sleep.sh had paused it (resume-service).
+# 4. ALWAYS force-redeploys App Runner (start-deployment), whether or not it
+#    was paused — a resumed service comes back running whatever secret
+#    values were baked into its LAST deployment, not the one we just wrote
+#    in step 2, since secrets are only read at container start.
 set -euo pipefail
 
 REGION="${AWS_REGION:-us-east-1}"
@@ -41,6 +44,21 @@ console.log(JSON.stringify(d));
 aws secretsmanager put-secret-value --region "$REGION" --secret-id "$SECRET_ARN" --secret-string "$NEW_SECRET" >/dev/null
 echo "Done."
 
+STATUS=$(aws apprunner describe-service --region "$REGION" --service-arn "$APPRUNNER_SERVICE_ARN" --query 'Service.Status' --output text)
+if [ "$STATUS" = "PAUSED" ]; then
+  echo "Resuming App Runner service (was PAUSED)..."
+  aws apprunner resume-service --region "$REGION" --service-arn "$APPRUNNER_SERVICE_ARN" >/dev/null
+  echo "Waiting for App Runner to reach RUNNING..."
+  while true; do
+    STATUS=$(aws apprunner describe-service --region "$REGION" --service-arn "$APPRUNNER_SERVICE_ARN" --query 'Service.Status' --output text)
+    [ "$STATUS" = "RUNNING" ] && break
+    sleep 5
+  done
+fi
+
+# A resumed service comes back with whatever secret values were baked into
+# its LAST deployment — not necessarily the DATABASE_URL we just wrote — so
+# always force a fresh deployment regardless of whether we just resumed.
 echo "Redeploying App Runner so it picks up the new DATABASE_URL..."
 aws apprunner start-deployment --region "$REGION" --service-arn "$APPRUNNER_SERVICE_ARN" >/dev/null
 echo "Waiting for App Runner to reach RUNNING..."
