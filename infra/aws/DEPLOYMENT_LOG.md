@@ -201,6 +201,19 @@ future `apply` touching these two resources: **always verify the live resource
 matches config after a security-group-source or service-registries change, don't
 just trust "Apply complete."**
 
+### 13. `wake.sh` never checked for PAUSED before redeploying
+
+After the dynamic-IP rework (#11), `wake.sh` was changed to unconditionally call
+`aws apprunner start-deployment` so the fresh `DATABASE_URL` would always be picked
+up — but the resume-from-PAUSED check that existed in an earlier version got dropped
+in that rewrite. `start-deployment` requires the service to already be `RUNNING`;
+called against a service `sleep.sh` had actually paused, it would fail outright.
+Caught by re-reading the script's actual logic rather than by hitting the failure
+directly. **Fix**: `wake.sh` now checks status first, calls `resume-service` (and
+waits for `RUNNING`) only if actually `PAUSED`, then *always* force-redeploys
+afterward regardless — a resumed service comes back running whatever secret values
+were baked into its last deployment, not the one just written to Secrets Manager.
+
 ## Operational runbook
 
 See `README.md`'s "Day to day" section for the actual commands. Summary:
