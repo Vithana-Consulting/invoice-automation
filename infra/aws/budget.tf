@@ -10,6 +10,14 @@
 # gets expensive, not to be a precise real-time cost tracker (AWS Budgets
 # data typically lags actual spend by ~8-24 hours).
 
+locals {
+  budget_alert_emails = [
+    "vithanaconsulting@gmail.com",
+    "dhiwagar@vithanaconsulting.com",
+    "deepak2004sakthi@gmail.com",
+  ]
+}
+
 resource "aws_budgets_budget" "monthly" {
   name         = "${var.project}-monthly"
   budget_type  = "COST"
@@ -30,7 +38,7 @@ resource "aws_budgets_budget" "monthly" {
     threshold                  = 5
     threshold_type             = "ABSOLUTE_VALUE"
     notification_type          = "ACTUAL"
-    subscriber_email_addresses = ["vithanaconsulting@gmail.com"]
+    subscriber_email_addresses = local.budget_alert_emails
   }
 
   notification {
@@ -38,7 +46,7 @@ resource "aws_budgets_budget" "monthly" {
     threshold                  = 10
     threshold_type             = "ABSOLUTE_VALUE"
     notification_type          = "ACTUAL"
-    subscriber_email_addresses = ["vithanaconsulting@gmail.com"]
+    subscriber_email_addresses = local.budget_alert_emails
   }
 
   notification {
@@ -46,6 +54,6 @@ resource "aws_budgets_budget" "monthly" {
     threshold                  = 100
     threshold_type             = "PERCENTAGE"
     notification_type          = "ACTUAL"
-    subscriber_email_addresses = ["vithanaconsulting@gmail.com"]
+    subscriber_email_addresses = local.budget_alert_emails
   }
 }
