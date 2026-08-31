@@ -7,7 +7,8 @@
 # used a VPC connector so App Runner could reach MySQL privately, but that
 # requires a NAT Gateway once real internet access (OpenAI, LlamaParse,
 # Google OAuth) is also needed — see network.tf and eip.tf for how MySQL is
-# reached instead (public internet, fixed Elastic IP, password-secured).
+# reached instead (public internet, dynamic IP kept current by
+# scripts/wake.sh, password-secured).
 
 # App Runner's own auto-scaling config. MinSize=1 — unlike the Fargate
 # desired_count=0 pattern, App Runner has no automatic scale-to-zero; the

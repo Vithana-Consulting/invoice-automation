@@ -9,9 +9,14 @@
 # one is attached (not just the traffic meant for the VPC), which would
 # have required a NAT Gateway anyway for the app's real internet needs
 # (OpenAI, LlamaParse, Google OAuth) — defeating the point of avoiding NAT.
-# MySQL is reachable over the public internet instead, on a fixed Elastic
-# IP (see eip.tf), secured by the generated password rather than network
-# isolation. See the security group below for the tradeoff this implies.
+# MySQL is reachable over the public internet instead, secured by the
+# generated password rather than network isolation. Its public IP changes
+# every time the Fargate task restarts (an Elastic IP would fix that, but
+# AWS is rejecting EIP association on this account with AuthFailure, likely
+# a new-account restriction — see README); scripts/wake.sh updates
+# DATABASE_URL in Secrets Manager with the fresh IP after every wake and
+# force-redeploys App Runner to pick it up. See the security group below
+# for the access tradeoff this implies.
 
 data "aws_vpc" "default" {
   default = true
