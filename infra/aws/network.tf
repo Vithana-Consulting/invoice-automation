@@ -20,7 +20,7 @@ data "aws_subnets" "default" {
 # public endpoint traffic never touches this SG).
 resource "aws_security_group" "apprunner_connector" {
   name        = "${var.project}-apprunner-connector"
-  description = "Egress-only SG for the App Runner VPC connector's ENIs"
+  description = "Egress-only SG for the App Runner VPC connector ENIs"
   vpc_id      = data.aws_vpc.default.id
 
   egress {
@@ -34,8 +34,13 @@ resource "aws_security_group" "apprunner_connector" {
 }
 
 resource "aws_security_group" "db" {
-  name        = "${var.project}-db"
-  description = "MySQL, reachable only from the App Runner VPC connector"
+  name = "${var.project}-db"
+  # NOTE: keep this description text EXACTLY as originally created — AWS
+  # does not allow changing an SG's description in place, so any edit here
+  # forces a destroy+recreate, which then deadlocks against this SG's own
+  # ENIs still being in use (the running MySQL task, EFS mount targets).
+  # Change the ingress/egress rules freely; never this string.
+  description = "MySQL, reachable only from the app task"
   vpc_id      = data.aws_vpc.default.id
 
   ingress {
@@ -57,8 +62,12 @@ resource "aws_security_group" "db" {
 }
 
 resource "aws_security_group" "efs" {
-  name        = "${var.project}-efs"
-  description = "NFS from the db task (mysql data only now — attachments moved to S3)"
+  name = "${var.project}-efs"
+  # NOTE: keep this description text EXACTLY as originally created — see the
+  # matching note on aws_security_group.db above. Changing it here is what
+  # caused the stuck destroy (this SG's mount-target ENIs must persist
+  # unchanged, so a forced replacement can never actually complete).
+  description = "NFS from app + db tasks"
   vpc_id      = data.aws_vpc.default.id
 
   ingress {

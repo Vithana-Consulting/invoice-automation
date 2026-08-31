@@ -3,9 +3,25 @@
 # https://<id>.<region>.awsapprunner.com URL, so there's no on-demand-TLS/
 # sslip.io machinery needed here at all.
 
+# App Runner's VPC connector doesn't support every AZ in every region/account
+# — this account's use1-az3 isn't supported. Excluding the one subnet that
+# lands there; the remaining subnets (5 of the default VPC's 6) are plenty
+# for the connector.
+data "aws_subnet" "default_azs" {
+  for_each = toset(data.aws_subnets.default.ids)
+  id       = each.value
+}
+
+locals {
+  apprunner_connector_subnets = [
+    for id, subnet in data.aws_subnet.default_azs : id
+    if subnet.availability_zone_id != "use1-az3"
+  ]
+}
+
 resource "aws_apprunner_vpc_connector" "this" {
   vpc_connector_name = "${var.project}-connector"
-  subnets            = data.aws_subnets.default.ids
+  subnets            = local.apprunner_connector_subnets
   security_groups    = [aws_security_group.apprunner_connector.id]
 }
 

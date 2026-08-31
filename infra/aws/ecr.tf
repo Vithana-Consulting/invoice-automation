@@ -5,6 +5,7 @@
 resource "aws_ecr_repository" "app" {
   name                 = "${var.project}-app"
   image_tag_mutability = "MUTABLE"
+  force_delete         = true # so `terraform destroy` doesn't get stuck on "repository not empty"
 
   image_scanning_configuration {
     scan_on_push = true

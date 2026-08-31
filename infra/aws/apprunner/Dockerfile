@@ -24,6 +24,9 @@ ENV BACKEND_INTERNAL_URL=$BACKEND_INTERNAL_URL
 ARG NEXT_PUBLIC_API_URL=
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 RUN npm run build
+# This repo's frontend has no public/ dir (no static assets committed) —
+# ensure it exists so the COPY below doesn't fail on a missing source.
+RUN mkdir -p public
 
 FROM python:3.11-slim
 
